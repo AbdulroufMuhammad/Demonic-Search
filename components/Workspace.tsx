@@ -63,7 +63,6 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   const [running, setRunning] = useState(project.status === "running");
   const [phaseNow, setPhaseNow] = useState("Starting…");
   const [stageCount, setStageCount] = useState(0);
-  const [budget, setBudget] = useState(initial.board.budget);
   const [runStart, setRunStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -79,6 +78,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
 
   const canvasRef = useRef<ReportCanvasHandle>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const boardRefreshTimer = useRef<ReturnType<typeof setTimeout>>();
   const started = useRef(false);
 
   // ----- data refresh -----
@@ -104,6 +104,14 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   async function refreshBoard() {
     const res = await fetch(`/api/projects/${project.id}/board`);
     if (res.ok) setBoard(await res.json());
+  }
+
+  // Sources/claims are written to the DB as they're found, well before a
+  // round's "check"/"plan" step fires — debounce so the board fills in live
+  // as the thread shows search activity, without a request per tool call.
+  function scheduleRefreshBoard() {
+    clearTimeout(boardRefreshTimer.current);
+    boardRefreshTimer.current = setTimeout(refreshBoard, 800);
   }
 
   useEffect(() => {
@@ -154,10 +162,10 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
       if (e.payload?.status) setPhaseNow(String(e.payload.status));
     } else if (e.type === "step") {
       setStageCount((n) => n + 1);
-    } else if (e.type === "tool-result" && typeof e.payload?.searchesLeft === "number") {
-      setBudget({ searchesLeft: e.payload.searchesLeft, tokensLeft: e.payload.tokensLeft ?? 0 });
+      if (e.payload?.kind === "check" || e.payload?.kind === "plan") scheduleRefreshBoard();
+    } else if (e.type === "tool-result" && (e.payload?.name === "web_search" || e.payload?.name === "web_fetch")) {
+      scheduleRefreshBoard();
     }
-    if (e.type === "step" && (e.payload?.kind === "check" || e.payload?.kind === "plan")) refreshBoard();
   }
   const tabRef = useRef(tab);
   tabRef.current = tab;
@@ -297,7 +305,6 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
         phaseNow={phaseNow}
         runPct={Math.min(95, stageCount * 10) || (project.status === "ready" ? 100 : 0)}
         runTime={`${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`}
-        searchesLeft={budget?.searchesLeft ?? 40}
         items={items}
         expanded={expanded}
         onToggle={(key) => setExpanded((e) => ({ ...e, [key]: !e[key] }))}

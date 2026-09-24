@@ -12,7 +12,6 @@ export default function ChatPanel({
   phaseNow,
   runPct,
   runTime,
-  searchesLeft,
   items,
   expanded,
   onToggle,
@@ -36,7 +35,6 @@ export default function ChatPanel({
   phaseNow?: string;
   runPct?: number;
   runTime?: string;
-  searchesLeft?: number;
   items: ThreadItem[];
   expanded: Record<string, boolean>;
   onToggle: (key: string) => void;
@@ -78,9 +76,7 @@ export default function ChatPanel({
         <div className="run-progress">
           <div className="run-progress-row">
             <span className="run-progress-phase">{phaseNow}</span>
-            <span>
-              {runTime} · {searchesLeft} searches left
-            </span>
+            <span>{runTime}</span>
           </div>
           <div className="run-progress-bar">
             <div className="run-progress-fill" style={{ width: `${runPct ?? 0}%` }} />

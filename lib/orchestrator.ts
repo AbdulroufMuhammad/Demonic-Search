@@ -6,8 +6,14 @@ import { verifyCitations } from "@/lib/citations";
 import { getTemplate } from "@/lib/templates";
 import { makeEmitter, type AgentEvent, type Emit } from "@/lib/events";
 
-const MAX_ROUNDS = 3;
-const CONCURRENCY = 4;
+// Kept small on purpose: a live run against NVIDIA's API showed each
+// reasoning-model call takes ~20-40s, and the whole run has to fit inside
+// one Vercel function invocation (300s, see app/api/projects/[id]/run and
+// .../chat). One critique round and 3 facets at a time keeps a typical run
+// well under that; see the matching note on ROLES in lib/agents/roles.ts.
+const MAX_ROUNDS = 1;
+const MAX_FACETS = 3;
+const CONCURRENCY = 3;
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const say = (emit: Emit, text: string) => emit({ role: "orchestrator", type: "say", payload: { text } });
@@ -58,7 +64,7 @@ export async function runResearch(
 
   board.plan = await runAgent(db, "planner", board, template, board.goal, emit);
   await board.checkpoint();
-  const facets = board.plan?.facets ?? [];
+  const facets = (board.plan?.facets ?? []).slice(0, MAX_FACETS);
   await say(
     emit,
     `I'll split this into ${plural(facets.length, "question")} and research them in parallel. A claim only makes it into the report if I can find its quote in the source page.`
@@ -77,7 +83,10 @@ export async function runResearch(
   const limit = pLimit(CONCURRENCY);
 
   for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
-    board.guard();
+    // Soft check, not board.guard(): running out of search budget mid-run
+    // should stop starting new rounds, not abort the whole run before the
+    // Writer ever sees the claims already gathered.
+    if (board.budget.searchesLeft <= 0) break;
     await emit({
       role: "orchestrator",
       type: "phase",

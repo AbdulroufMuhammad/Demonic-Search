@@ -27,9 +27,16 @@ function safeJson(content: string): any {
   }
 }
 
+// Planner/Critic get the faster glm-flash model, not the slower reasoning
+// model: their output is short JSON that doesn't need deep reasoning, and a
+// live run against NVIDIA's API showed ~20-40s per reasoning-model call —
+// with a Researcher's multi-step tool loop and the whole pipeline needing to
+// fit inside one Vercel function invocation, that's not a cost to pay twice
+// per round for roles that don't need it. Same reasoning caps Researcher's
+// maxSteps in MAX_ROUNDS/MAX_FACETS/CONCURRENCY in lib/orchestrator.ts.
 export const ROLES: Record<RoleName, RoleConfig> = {
   planner: {
-    model: "glm",
+    model: "glm-flash",
     tools: [],
     maxSteps: 1,
     systemPrompt: (board) => `You are the Planner in a research team.
@@ -44,7 +51,7 @@ Goal: ${board.goal}`,
   researcher: {
     model: "glm-flash",
     tools: TAVILY_TOOL_SCHEMAS,
-    maxSteps: 6,
+    maxSteps: 4,
     systemPrompt: () => `You are a Researcher. You get one facet/question. Use web_search and web_fetch
 to find supporting evidence. Cite sources only by their short ID (e.g. S3), never by URL — you do not
 know the real URL. Every claim needs a short exact quote copied verbatim from the fetched source text.
@@ -54,7 +61,7 @@ When done, reply with ONLY JSON: {"claims":[{"text":"...","sourceIds":["S1"],"qu
   },
 
   critic: {
-    model: "glm",
+    model: "glm-flash",
     tools: [],
     maxSteps: 1,
     systemPrompt: () => `You are the Critic. Given the goal, outline and current claims, list any

@@ -76,7 +76,7 @@ export async function runAgent(
   await emit({ role, type: "phase", payload: { status: "start" } });
 
   for (let step = 0; step < cfg.maxSteps; step++) {
-    board.guard();
+    board.guardTokens();
 
     const r = await chat(cfg.model, {
       messages,
@@ -116,7 +116,14 @@ export async function runAgent(
           payload: { name: tc.name, callId, ...summarize(tc.name, args, result, board) },
         });
       } catch (e) {
-        if (e instanceof BudgetExceeded) throw e;
+        if (e instanceof BudgetExceeded) {
+          // The shared search budget ran out mid-call. Stop this agent here
+          // and hand back whatever it already gathered rather than aborting
+          // the whole run — other researchers' claims and the Writer/Verifier
+          // still proceed.
+          await emit({ role, type: "phase", payload: { status: "budget-exhausted" } });
+          return cfg.fallback(board);
+        }
         result = { error: e instanceof Error ? e.message : String(e) };
         await emit({ role, type: "tool-result", payload: { name: tc.name, callId, error: (result as any).error } });
         badCalls++;
