@@ -2,6 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type AgentEvent = {
   role?: string;
+  // Distinguishes concurrent calls to the same role (e.g. parallel
+  // researchers) so the UI can keep their streamed output separate.
+  callId?: string;
   type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done";
   payload: Record<string, unknown>;
 };

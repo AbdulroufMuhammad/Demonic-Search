@@ -39,9 +39,12 @@ export async function runAgent(
     { role: "system", content: cfg.systemPrompt(board, template) },
     { role: "user", content: input },
   ];
+  // Distinguishes this call from other concurrent calls to the same role
+  // (e.g. parallel researchers) in the live event stream.
+  const callId = `${role}-${Math.random().toString(36).slice(2, 9)}`;
 
   let badCalls = 0;
-  await emit({ role, type: "phase", payload: { status: "start" } });
+  await emit({ role, callId, type: "phase", payload: { status: "start" } });
 
   for (let step = 0; step < cfg.maxSteps; step++) {
     board.guard();
@@ -49,7 +52,7 @@ export async function runAgent(
     const r = await chat(cfg.model, {
       messages,
       tools: cfg.tools.length ? cfg.tools : undefined,
-      onToken: (t) => emit({ role, type: "token", payload: { t } }),
+      onToken: (t) => emit({ role, callId, type: "token", payload: { t } }),
     });
     board.meter(r.usage);
 
@@ -64,7 +67,7 @@ export async function runAgent(
     messages.push(assistant);
 
     if (!r.toolCalls.length) {
-      await emit({ role, type: "phase", payload: { status: "done" } });
+      await emit({ role, callId, type: "phase", payload: { status: "done" } });
       return cfg.parseResult(r.content);
     }
 
@@ -74,15 +77,15 @@ export async function runAgent(
         const args = JSON.parse(tc.args || "{}");
         const fn = tools[tc.name];
         if (!fn) throw new Error(`unknown tool: ${tc.name}`);
-        await emit({ role, type: "tool-call", payload: { name: tc.name, args } });
+        await emit({ role, callId, type: "tool-call", payload: { name: tc.name, args } });
         result = await fn(args, board);
-        await emit({ role, type: "tool-result", payload: { name: tc.name } });
+        await emit({ role, callId, type: "tool-result", payload: { name: tc.name } });
       } catch (e) {
         if (e instanceof BudgetExceeded) throw e;
         result = { error: e instanceof Error ? e.message : String(e) };
         badCalls++;
         if (badCalls > 2) {
-          await emit({ role, type: "error", payload: { message: "too many bad tool calls" } });
+          await emit({ role, callId, type: "error", payload: { message: "too many bad tool calls" } });
           return cfg.fallback(board);
         }
       }
@@ -94,6 +97,6 @@ export async function runAgent(
     }
   }
 
-  await emit({ role, type: "phase", payload: { status: "fallback" } });
+  await emit({ role, callId, type: "phase", payload: { status: "fallback" } });
   return cfg.fallback(board);
 }
