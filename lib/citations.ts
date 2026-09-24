@@ -1,0 +1,20 @@
+import type { Board } from "@/lib/board";
+
+function normalize(s: string) {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * For each claim, confirm the quoted span actually exists in the stored
+ * source text. Claims that fail are dropped rather than sent to the Writer
+ * (guide §5/§6) — this is what keeps every citation resolvable.
+ */
+export function verifyCitations(board: Board) {
+  for (const c of board.claims) {
+    c.ok = c.sourceIds.some((id) => {
+      const src = board.sources.get(id);
+      return !!src?.text && normalize(src.text).includes(normalize(c.quote));
+    });
+  }
+  board.claims = board.claims.filter((c) => c.ok);
+}
