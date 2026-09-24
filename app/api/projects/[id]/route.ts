@@ -1,31 +1,22 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getProjectAccess, denied } from "@/lib/access";
+import { loadProjectData } from "@/lib/projectData";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const res = await getProjectAccess(params.id);
+  if (!res.ok) return denied(res.status);
+  return Response.json(await loadProjectData(res.access.admin, res.access.project));
+}
 
-  const [{ data: project, error }, { data: messages }, { data: files }] = await Promise.all([
-    supabase.from("projects").select("*").eq("id", params.id).single(),
-    supabase.from("messages").select("*").eq("project_id", params.id).order("created_at"),
-    supabase
-      .from("files")
-      .select("path, version, storage_path, content_type, created_at")
-      .eq("project_id", params.id)
-      .order("version", { ascending: false }),
-  ]);
-  if (error || !project) return NextResponse.json({ error: "not found" }, { status: 404 });
-
-  const latestByPath = new Map<string, (typeof files extends (infer U)[] | null ? U : never)>();
-  for (const f of files ?? []) if (!latestByPath.has(f.path)) latestByPath.set(f.path, f);
-
-  return NextResponse.json({
-    project,
-    messages,
-    files: [...latestByPath.values()].map((f) => ({
-      ...f,
-      url: supabase.storage.from("artifacts").getPublicUrl(f.storage_path).data.publicUrl,
-    })),
-  });
+/** Owner-only settings: link sharing. */
+export async function PATCH(req: Request, { params }: { params: { id: string } }) {
+  const res = await getProjectAccess(params.id, "owner");
+  if (!res.ok) return denied(res.status);
+  const { share_access } = await req.json();
+  if (!["private", "view", "edit"].includes(share_access))
+    return Response.json({ error: "share_access must be private, view or edit" }, { status: 400 });
+  const { error } = await res.access.admin.from("projects").update({ share_access }).eq("id", params.id);
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  return Response.json({ share_access });
 }

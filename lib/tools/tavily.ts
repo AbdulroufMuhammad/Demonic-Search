@@ -19,13 +19,14 @@ async function tv(path: string, body: Record<string, unknown>) {
 // URLs — so a model cannot fabricate a citation link (guide §6).
 export async function webSearch(
   board: Board,
-  { query, max_results = 6 }: { query: string; max_results?: number }
+  { query, max_results = 6 }: { query: string; max_results?: number },
+  facetId?: string
 ) {
   board.spend("search");
   const r = await tv("/search", { query, max_results, search_depth: "advanced" });
   const out = [];
   for (const x of r.results ?? []) {
-    const id = board.registerSource(x.url, x.title, x.content);
+    const id = board.registerSource(x.url, x.title, x.content, facetId);
     await board.persistSource(id);
     out.push({ id, title: x.title, snippet: String(x.content ?? "").slice(0, 400), score: x.score });
   }

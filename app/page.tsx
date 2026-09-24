@@ -1,46 +1,76 @@
 import { redirect } from "next/navigation";
-import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import Sidebar from "@/components/Sidebar";
 import Composer from "@/components/Composer";
+import { getTemplate } from "@/lib/templates";
+import { fromRow } from "@/lib/designSystems";
+import { relativeTime } from "@/lib/relativeTime";
 
-export default async function HomePage() {
+const STATUS_LABEL: Record<string, string> = {
+  idle: "Not started",
+  running: "Researching",
+  ready: "Ready",
+  error: "Error",
+};
+const statusColor = (s: string) => (s === "ready" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)");
+
+export default async function HomePage({ searchParams }: { searchParams: { ds?: string } }) {
   const supabase = createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/login");
 
-  const { data: projects } = await supabase
-    .from("projects")
-    .select("id, title, template, status, updated_at")
-    .order("updated_at", { ascending: false })
-    .limit(9);
+  const [{ data: projects }, { data: dsRows }] = await Promise.all([
+    supabase
+      .from("projects")
+      .select("id, title, template, status, updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(12),
+    supabase
+      .from("design_systems")
+      .select("*")
+      .order("owner_id", { ascending: true, nullsFirst: true })
+      .order("created_at", { ascending: true }),
+  ]);
+  const systems = (dsRows ?? []).map(fromRow);
 
   return (
-    <div className="container">
-      <div className="topbar">
-        <div className="brand">
-          Demonic Search
-          <small>Research and artifact engine · Supabase</small>
+    <div className="app-shell">
+      <Sidebar active="home" email={auth.user.email ?? ""} recent={(projects ?? []).slice(0, 6).map((p) => ({ id: p.id, title: p.title }))} />
+      <main className="home-main">
+        <div className="home-col">
+          <h1 className="home-h1">What should we find out?</h1>
+          <Composer systems={systems} initialDsId={searchParams.ds ?? ""} />
         </div>
-        <span style={{ color: "var(--muted)", fontSize: 13 }}>{auth.user.email}</span>
-      </div>
 
-      <h1 className="title">What should we create?</h1>
-      <Composer />
-
-      {!!projects?.length && (
-        <div className="recent">
-          <h3>Recent</h3>
-          <div className="recent-grid">
-            {projects.map((p) => (
-              <Link key={p.id} href={`/project/${p.id}`} className="recent-card">
-                <span className="kind">{p.template}</span>
-                <strong>{p.title}</strong>
-                <span className="meta">{p.status} · {new Date(p.updated_at).toLocaleString()}</span>
-              </Link>
-            ))}
+        {!!projects?.length && (
+          <div className="home-col">
+            <span className="section-label">Recent projects</span>
+            <div className="recent-projects-grid">
+              {projects.map((p) => {
+                const t = getTemplate(p.template);
+                return (
+                  <a key={p.id} href={`/project/${p.id}`} className="project-card">
+                    <div className="project-thumb">
+                      <span className="kind">{t.label}</span>
+                      <span className="headline">{p.title}</span>
+                      <span className="bar" style={{ width: "90%" }} />
+                      <span className="bar" style={{ width: "80%" }} />
+                      <span className="bar" style={{ width: "86%" }} />
+                    </div>
+                    <div className="project-meta">
+                      <span className="name">{p.title}</span>
+                      <span className="status">
+                        <span className="status-dot" style={{ background: statusColor(p.status) }} />
+                        {STATUS_LABEL[p.status] ?? p.status} · {relativeTime(p.updated_at)}
+                      </span>
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </main>
     </div>
   );
 }

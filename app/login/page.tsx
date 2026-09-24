@@ -21,11 +21,14 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="container">
+    <div className="login-shell">
       <form className="login-form" onSubmit={sendLink}>
-        <h1 className="title" style={{ fontSize: 22 }}>Sign in</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="brand-mark">D</span>
+          <span className="brand-name">Demonic Search</span>
+        </div>
         {sent ? (
-          <p>Check your email for a sign-in link.</p>
+          <p style={{ color: "var(--muted)", fontSize: 14 }}>Check your email for a sign-in link.</p>
         ) : (
           <>
             <input
@@ -36,7 +39,7 @@ export default function LoginPage() {
               required
             />
             <button type="submit">Send magic link</button>
-            {error && <p style={{ color: "#e05252" }}>{error}</p>}
+            {error && <p style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{error}</p>}
           </>
         )}
       </form>

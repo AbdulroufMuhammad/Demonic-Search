@@ -2,8 +2,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 const BUCKET = "artifacts";
 
-/** Files tool: write/read artifact files. Content lives in Supabase Storage; the `files` table tracks versions. */
-export function makeFileTools(db: SupabaseClient, projectId: string) {
+/**
+ * Files tool: write/read artifact files. Content lives in Supabase Storage; the `files` table tracks versions.
+ * `transform` runs on every HTML write (see lib/report/finalize.ts).
+ */
+export function makeFileTools(
+  db: SupabaseClient,
+  projectId: string,
+  transform?: (path: string, content: string) => string
+) {
   async function nextVersion(path: string) {
     const { data } = await db
       .from("files")
@@ -16,8 +23,8 @@ export function makeFileTools(db: SupabaseClient, projectId: string) {
   }
 
   async function write_file({ path, content }: { path: string; content: string }) {
+    if (transform && path.endsWith(".html")) content = transform(path, content);
     const version = await nextVersion(path);
-    const storagePath = `${projectId}/${path}?v=${version}`.replace(/\?v=/, "/v");
     const key = `${projectId}/${version}/${path}`;
     const { error } = await db.storage
       .from(BUCKET)

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { fromRow, type DesignSystem } from "@/lib/designSystems";
 
 export type Facet = { id: string; question: string };
 export type Plan = { facets: Facet[]; outline: { heading: string }[] };
@@ -23,8 +24,11 @@ export class BudgetExceeded extends Error {}
  * raw tables directly, so the schema can change without touching agent code.
  */
 export class Board {
-  sources = new Map<string, { url: string; title?: string; text?: string }>();
+  sources = new Map<string, { url: string; title?: string; text?: string; facetId?: string }>();
   claims: Claim[] = [];
+  /** Claims whose quote was not found in the source text. Kept for the report's "Excluded" note. */
+  dropped: Claim[] = [];
+  designSystem: DesignSystem | null = null;
   gaps: Gap[] = [];
   plan: Plan | null = null;
   budget: Budget;
@@ -49,6 +53,14 @@ export class Board {
 
     const board = new Board(db, projectId, project.goal ?? "", project.template, project.budget);
     board.plan = project.plan;
+    if (project.design_system_id) {
+      const { data: ds } = await db
+        .from("design_systems")
+        .select("*")
+        .eq("id", project.design_system_id)
+        .single();
+      if (ds) board.designSystem = fromRow(ds);
+    }
 
     const [{ data: sources }, { data: claims }, { data: gaps }] = await Promise.all([
       db.from("sources").select("*").eq("project_id", projectId),
@@ -56,9 +68,14 @@ export class Board {
       db.from("gaps").select("*").eq("project_id", projectId).eq("resolved", false),
     ]);
     for (const s of sources ?? []) {
-      board.sources.set(s.short_id, { url: s.url, title: s.title ?? undefined, text: s.text ?? undefined });
+      board.sources.set(s.short_id, {
+        url: s.url,
+        title: s.title ?? undefined,
+        text: s.text ?? undefined,
+        facetId: s.facet_id ?? undefined,
+      });
     }
-    board.claims = (claims ?? []).map((c) => ({
+    const all = (claims ?? []).map((c) => ({
       id: c.id,
       text: c.text,
       facetId: c.facet_id ?? undefined,
@@ -67,6 +84,8 @@ export class Board {
       confidence: c.confidence ?? undefined,
       ok: c.ok ?? undefined,
     }));
+    board.claims = all.filter((c) => c.ok !== false);
+    board.dropped = all.filter((c) => c.ok === false);
     board.gaps = (gaps ?? []).map((g) => ({
       facetId: g.facet_id ?? undefined,
       question: g.question,
@@ -75,10 +94,10 @@ export class Board {
     return board;
   }
 
-  registerSource(url: string, title?: string, text?: string): string {
+  registerSource(url: string, title?: string, text?: string, facetId?: string): string {
     for (const [id, s] of this.sources) if (s.url === url) return id;
     const id = `S${this.sources.size + 1}`;
-    this.sources.set(id, { url, title, text });
+    this.sources.set(id, { url, title, text, facetId });
     return id;
   }
 
@@ -92,6 +111,7 @@ export class Board {
         url: s.url,
         title: s.title,
         text: s.text,
+        facet_id: s.facetId ?? null,
         fetched_at: s.text ? new Date().toISOString() : null,
       },
       { onConflict: "project_id,short_id" }
@@ -121,7 +141,9 @@ export class Board {
   }
 
   async mergeClaims(claims: Claim[]) {
-    const seen = new Set(this.claims.map((c) => `${c.sourceIds.join(",")}::${c.quote}`));
+    const seen = new Set(
+      [...this.claims, ...this.dropped].map((c) => `${c.sourceIds.join(",")}::${c.quote}`)
+    );
     for (const c of claims) {
       const key = `${c.sourceIds.join(",")}::${c.quote}`;
       if (seen.has(key)) continue;
@@ -131,10 +153,11 @@ export class Board {
   }
 
   async persistClaims() {
-    if (!this.claims.length) return;
+    const all = [...this.claims, ...this.dropped];
+    if (!all.length) return;
     await this.db.from("claims").delete().eq("project_id", this.projectId);
     await this.db.from("claims").insert(
-      this.claims.map((c) => ({
+      all.map((c) => ({
         project_id: this.projectId,
         facet_id: c.facetId,
         text: c.text,
@@ -146,8 +169,13 @@ export class Board {
     );
   }
 
+  /** Gaps from earlier rounds are marked resolved (not deleted) so the board can show them. */
   async persistGaps() {
-    await this.db.from("gaps").delete().eq("project_id", this.projectId);
+    await this.db
+      .from("gaps")
+      .update({ resolved: true })
+      .eq("project_id", this.projectId)
+      .eq("resolved", false);
     if (this.gaps.length) {
       await this.db.from("gaps").insert(
         this.gaps.map((g) => ({

@@ -3,6 +3,7 @@ import type { Board } from "@/lib/board";
 import { TAVILY_TOOL_SCHEMAS } from "@/lib/tools/tavily";
 import { FILE_TOOL_SCHEMAS } from "@/lib/tools/files";
 import type { Template } from "@/lib/templates";
+import { describeForWriter } from "@/lib/designSystems";
 
 export type RoleName = "planner" | "researcher" | "critic" | "writer" | "verifier";
 
@@ -69,10 +70,13 @@ If coverage is sufficient, return {"gaps":[]}.`,
     tools: FILE_TOOL_SCHEMAS,
     maxSteps: 8,
     systemPrompt: (board, template) => `You are the Writer. ${template.writerSkill}
+${template.research ? "" : describeForWriter(board.designSystem)}
 Use write_file / str_replace / read_file to produce the artifact at path "index.html".
 Never invent facts. If claims with citations are provided, cite them inline like [S3] and never
-alter their meaning. When the file is finished, reply with plain text "DONE" and no further tool calls.`,
-    parseResult: () => ({ done: true }),
+alter their meaning. When editing an existing file, read it first and change only what was asked.
+When the file is finished, reply with one short plain-text sentence saying what you wrote or changed,
+and make no further tool calls.`,
+    parseResult: (content) => ({ done: true, summary: content.trim() }),
     fallback: jsonFallback({ done: false }),
   },
 

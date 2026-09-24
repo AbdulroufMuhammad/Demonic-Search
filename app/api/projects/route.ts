@@ -26,7 +26,12 @@ export async function POST(req: Request) {
   if (!auth.user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
 
   const body = await req.json();
-  const { prompt, template = "blank", model_profile = "quality", design_system_id = null } = body;
+  const { prompt, template = "blank", model_profile = "quality" } = body;
+  // "default" is the built-in house style, which is not a stored row.
+  const design_system_id =
+    typeof body.design_system_id === "string" && body.design_system_id && body.design_system_id !== "default"
+      ? body.design_system_id
+      : null;
   if (!prompt || typeof prompt !== "string") {
     return NextResponse.json({ error: "prompt is required" }, { status: 400 });
   }
@@ -35,7 +40,7 @@ export async function POST(req: Request) {
     .from("projects")
     .insert({
       owner_id: auth.user.id,
-      title: prompt.slice(0, 80),
+      title: prompt.split(/[:\n]/)[0].trim().slice(0, 80) || prompt.slice(0, 80),
       template,
       model_profile,
       design_system_id,

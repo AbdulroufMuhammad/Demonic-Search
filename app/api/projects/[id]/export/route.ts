@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getProjectAccess, denied } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -7,9 +7,9 @@ export const maxDuration = 60;
 // PDF export renders the same file the canvas shows, from its isolated
 // public storage URL, via headless Chromium (guide §7/§8).
 export async function GET(req: Request, { params }: { params: { id: string } }) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const res = await getProjectAccess(params.id);
+  if (!res.ok) return denied(res.status);
+  const supabase = res.access.admin;
 
   const { searchParams } = new URL(req.url);
   const format = searchParams.get("format") ?? "pdf";
@@ -28,7 +28,14 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
   const { data: pub } = supabase.storage.from("artifacts").getPublicUrl(file.storage_path);
 
   if (format === "html") {
-    return NextResponse.redirect(pub.publicUrl);
+    const { data: blob } = await supabase.storage.from("artifacts").download(file.storage_path);
+    if (!blob) return NextResponse.json({ error: "file not found" }, { status: 404 });
+    return new NextResponse(await blob.text(), {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${params.id}.html"`,
+      },
+    });
   }
 
   if (format !== "pdf") {

@@ -1,48 +1,21 @@
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { getProjectAccess, denied } from "@/lib/access";
 import { runProject } from "@/lib/orchestrator";
+import { sseResponse } from "@/lib/sse";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-export async function POST(_req: Request, { params }: { params: { id: string } }) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return new Response("unauthenticated", { status: 401 });
+export async function POST(req: Request, { params }: { params: { id: string } }) {
+  const res = await getProjectAccess(params.id);
+  if (!res.ok) return denied(res.status);
+  const { admin, project } = res.access;
+  if (project.status === "running") return Response.json({ error: "already running" }, { status: 409 });
 
-  const { data: project } = await supabase
-    .from("projects")
-    .select("id, owner_id")
-    .eq("id", params.id)
-    .single();
-  if (!project || project.owner_id !== auth.user.id) {
-    return new Response("not found", { status: 404 });
+  // Optional instructions typed before the run starts; the Writer reads them.
+  const body = await req.json().catch(() => ({}));
+  if (typeof body?.message === "string" && body.message.trim()) {
+    await admin.from("messages").insert({ project_id: params.id, role: "user", content: body.message.trim() });
   }
 
-  const admin = createAdminClient();
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-      };
-      try {
-        await runProject(admin, params.id, (e) => send(e));
-        send({ type: "stream-end" });
-      } catch (e) {
-        send({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
-      } finally {
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+  return sseResponse((send) => runProject(admin, params.id, (e) => send(e)).then(() => undefined));
 }

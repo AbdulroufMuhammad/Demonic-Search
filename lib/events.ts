@@ -2,7 +2,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type AgentEvent = {
   role?: string;
-  type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done";
+  /**
+   * token/phase/tool-call/tool-result/error/done come from the agent loop.
+   * "say" is orchestrator narration shown as assistant text in the chat;
+   * "step" is a summarised pipeline step (plan, citation check, verify).
+   */
+  type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done" | "say" | "step";
   payload: Record<string, unknown>;
 };
 
@@ -14,6 +19,8 @@ export function makeEmitter(
 ) {
   return async function emit(e: AgentEvent) {
     onEvent?.(e);
+    // Tokens are only useful live; persisting one row per token floods the table.
+    if (e.type === "token") return;
     await db.from("events").insert({
       project_id: projectId,
       role: e.role ?? null,
