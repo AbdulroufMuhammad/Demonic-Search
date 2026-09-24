@@ -98,18 +98,23 @@ export class Board {
     );
   }
 
+  // Search/extract spend is checked here, scoped to the tool call that
+  // consumes it — never as a blanket precondition for every agent step
+  // (that would also block the Writer/Verifier, which never search).
   spend(kind: "search" | "extract" | "tokens", amount = 1) {
-    if (kind === "search" || kind === "extract") this.budget.searchesLeft -= amount;
+    if (kind === "search" || kind === "extract") {
+      this.budget.searchesLeft -= amount;
+      if (this.budget.searchesLeft < 0) throw new BudgetExceeded("search budget exhausted");
+    }
     if (kind === "tokens") this.budget.tokensLeft -= amount;
-    this.guard();
   }
 
   meter(usage: { total_tokens?: number } | null) {
     if (usage?.total_tokens) this.budget.tokensLeft -= usage.total_tokens;
   }
 
-  guard() {
-    if (this.budget.searchesLeft <= 0) throw new BudgetExceeded("search budget exhausted");
+  /** General per-step guard, used by every role — token spend only. */
+  guardTokens() {
     if (this.budget.tokensLeft <= 0) throw new BudgetExceeded("token budget exhausted");
   }
 

@@ -37,7 +37,7 @@ export async function runResearch(
   const limit = pLimit(CONCURRENCY);
 
   for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
-    board.guard();
+    if (board.budget.searchesLeft <= 0) break;
     const results = await Promise.all(
       queue.map((q: any) =>
         limit(() =>

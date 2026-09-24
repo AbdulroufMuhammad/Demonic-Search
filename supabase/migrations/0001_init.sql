@@ -24,7 +24,7 @@ create table projects (
   design_system_id uuid references design_systems(id) on delete set null,
   goal text,
   status text not null default 'idle',
-  budget jsonb not null default '{"tokensLeft":200000,"searchesLeft":40,"rounds":0,"maxRounds":3}'::jsonb,
+  budget jsonb not null default '{"tokensLeft":300000,"searchesLeft":150,"rounds":0,"maxRounds":1}'::jsonb,
   plan jsonb,
   thumbnail_path text,
   created_at timestamptz not null default now(),
