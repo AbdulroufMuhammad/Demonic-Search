@@ -12,6 +12,8 @@ import PublicReport from "@/components/PublicReport";
  * access control.
  */
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function PublicProjectPage({ params }: { params: { id: string } }) {
   const admin = createAdminClient();

@@ -38,6 +38,14 @@ export function buildThread(events: StoredEvent[], messages: StoredMessage[]): T
 
   const items: ThreadItem[] = [];
   const toolIndex = new Map<string, number>();
+  const phaseIndex = new Map<string, number>();
+  const phaseKey = (e: StoredEvent, p: Record<string, any>) => `${e.role ?? "x"}:${p.facetId ?? "x"}`;
+  const resolveThinking = (e: StoredEvent, p: Record<string, any>) => {
+    const idx = phaseIndex.get(phaseKey(e, p));
+    if (idx != null && items[idx]?.type === "tool" && (items[idx] as ToolItem).active) {
+      items[idx] = { ...(items[idx] as ToolItem), active: false, verb: "Thought" };
+    }
+  };
 
   for (const r of rows) {
     if (r.kind === "msg") {
@@ -54,7 +62,22 @@ export function buildThread(events: StoredEvent[], messages: StoredMessage[]): T
       const text = String(p.text ?? "");
       items.push({ key: "e" + e.id, type: "text", text, shown: text, caret: false });
     } else if (e.type === "error") {
+      resolveThinking(e, p);
       items.push({ key: "e" + e.id, type: "error", text: String(p.message ?? "Something went wrong") });
+    } else if (e.type === "phase") {
+      // A role's start/end — rendered as a "thinking" row so the user sees
+      // the model is working (not stuck) even during a toolless call
+      // (Planner/Critic) or before a Researcher's first tool call.
+      // Orchestrator round-transition phases (status is a description, not
+      // "start") have no matching row and are silently ignored here — the
+      // progress bar already shows those.
+      if (p.status === "start" && e.role && e.role !== "orchestrator") {
+        const label = e.role[0].toUpperCase() + e.role.slice(1);
+        phaseIndex.set(phaseKey(e, p), items.length);
+        items.push({ key: "ph" + e.id, type: "tool", verb: "Thinking", active: true, detail: `${label} is working…`, meta: "", rows: [] });
+      } else {
+        resolveThinking(e, p);
+      }
     } else if (e.type === "step") {
       const v = STEP_VERB[p.kind] ?? ["Done", "Working"];
       items.push({

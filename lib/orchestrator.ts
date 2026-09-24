@@ -39,6 +39,10 @@ function safeJson(content: string): any {
  * a real run.
  */
 async function checkClarify(db: SupabaseClient, projectId: string, goal: string, template: Template, emit: Emit): Promise<boolean> {
+  // Visible immediately — otherwise the user sees nothing at all for
+  // however long this call takes, which is exactly the "is it stuck?"
+  // complaint this whole check exists to avoid causing.
+  await emit({ role: "planner", type: "phase", payload: { status: "start" } });
   let parsed: any;
   try {
     const r = await chat("glm-flash", {
@@ -49,11 +53,14 @@ async function checkClarify(db: SupabaseClient, projectId: string, goal: string,
         },
         { role: "user", content: goal },
       ],
+      signal: AbortSignal.timeout(25_000),
     });
     parsed = safeJson(r.content);
   } catch {
+    await emit({ role: "planner", type: "phase", payload: { status: "fallback" } });
     return false;
   }
+  await emit({ role: "planner", type: "phase", payload: { status: "done" } });
   if (parsed?.clear === false && typeof parsed.question === "string" && parsed.question.trim()) {
     await say(emit, parsed.question.trim());
     await db.from("projects").update({ status: "needs_input", updated_at: new Date().toISOString() }).eq("id", projectId);
@@ -252,8 +259,17 @@ export async function runDirect(
 export async function runProject(db: SupabaseClient, projectId: string, onEvent?: (e: AgentEvent) => void) {
   const { data: project } = await db.from("projects").select("template, status, goal").eq("id", projectId).single();
   const template = getTemplate(project?.template ?? "blank");
+  const wasNeedsInput = project?.status === "needs_input";
 
-  if (project?.status !== "needs_input") {
+  // Flip to "running" before anything else — including checkClarify, which
+  // makes its own model call and previously ran while status was still
+  // "idle". If that call was ever slow (or the function got killed before
+  // it returned), the project sat at "idle" with zero visible feedback and
+  // zero DB write for the user to see, indistinguishable from "did my click
+  // even register?". Now there's always an immediate, visible state change.
+  await db.from("projects").update({ status: "running", updated_at: new Date().toISOString() }).eq("id", projectId);
+
+  if (!wasNeedsInput) {
     const emit = makeEmitter(db, projectId, onEvent);
     const paused = await checkClarify(db, projectId, project?.goal ?? "", template, emit);
     if (paused) return;
@@ -276,7 +292,6 @@ export async function runProject(db: SupabaseClient, projectId: string, onEvent?
     }
   }
 
-  await db.from("projects").update({ status: "running" }).eq("id", projectId);
   try {
     return template.research
       ? await runResearch(db, projectId, onEvent)

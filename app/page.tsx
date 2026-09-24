@@ -15,8 +15,13 @@ const STATUS_LABEL: Record<string, string> = {
 const statusColor = (s: string) =>
   s === "ready" || s === "needs_input" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)";
 
-// Lists live projects/design systems — must never be frozen at build time.
+// Lists live projects/design systems — must never be frozen at build time,
+// and never served from a cached fetch (the Supabase client makes its own
+// fetch() calls under the hood, which Next.js can cache independently of
+// the route's own dynamic rendering unless explicitly told not to).
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function HomePage({ searchParams }: { searchParams: { ds?: string } }) {
   const admin = createAdminClient();

@@ -11,6 +11,12 @@ import { finalizeArtifact } from "@/lib/report/finalize";
 type Tool = (args: any, board: Board) => Promise<unknown>;
 export type AgentContext = { facetId?: string };
 
+// A hard cap per model call, well above the ~20-40s a reasoning-model call
+// has been observed to take (see the note on ROLES in lib/agents/roles.ts).
+// Without this, a stalled provider call hangs silently forever — no error,
+// no event, nothing for the user to see — instead of failing visibly.
+const MODEL_TIMEOUT_MS = 60_000;
+
 export function artifactTransform(board: Board, template: Template) {
   return (_path: string, content: string) =>
     finalizeArtifact(content, {
@@ -73,16 +79,31 @@ export async function runAgent(
   ];
 
   let badCalls = 0;
-  await emit({ role, type: "phase", payload: { status: "start" } });
+  await emit({ role, type: "phase", payload: { status: "start", facetId: ctx.facetId } });
 
   for (let step = 0; step < cfg.maxSteps; step++) {
     board.guardTokens();
 
-    const r = await chat(cfg.model, {
-      messages,
-      tools: cfg.tools.length ? cfg.tools : undefined,
-      onToken: (t) => emit({ role, type: "token", payload: { t } }),
-    });
+    let r;
+    try {
+      r = await chat(cfg.model, {
+        messages,
+        tools: cfg.tools.length ? cfg.tools : undefined,
+        onToken: (t) => emit({ role, type: "token", payload: { t } }),
+        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+      });
+    } catch (e) {
+      // A stalled/unresponsive provider call — stop this agent here and
+      // hand back its fallback rather than hanging the whole run, same
+      // spirit as the BudgetExceeded handling below.
+      const timedOut = (e as any)?.name === "TimeoutError";
+      await emit({
+        role,
+        type: "error",
+        payload: { message: timedOut ? "The model didn't respond in time." : e instanceof Error ? e.message : String(e), facetId: ctx.facetId },
+      });
+      return cfg.fallback(board);
+    }
     board.meter(r.usage);
 
     const assistant: ChatMessage = { role: "assistant", content: r.content || null };
@@ -96,7 +117,7 @@ export async function runAgent(
     messages.push(assistant);
 
     if (!r.toolCalls.length) {
-      await emit({ role, type: "phase", payload: { status: "done" } });
+      await emit({ role, type: "phase", payload: { status: "done", facetId: ctx.facetId } });
       return cfg.parseResult(r.content);
     }
 
@@ -121,14 +142,14 @@ export async function runAgent(
           // and hand back whatever it already gathered rather than aborting
           // the whole run — other researchers' claims and the Writer/Verifier
           // still proceed.
-          await emit({ role, type: "phase", payload: { status: "budget-exhausted" } });
+          await emit({ role, type: "phase", payload: { status: "budget-exhausted", facetId: ctx.facetId } });
           return cfg.fallback(board);
         }
         result = { error: e instanceof Error ? e.message : String(e) };
         await emit({ role, type: "tool-result", payload: { name: tc.name, callId, error: (result as any).error } });
         badCalls++;
         if (badCalls > 2) {
-          await emit({ role, type: "error", payload: { message: "too many bad tool calls" } });
+          await emit({ role, type: "error", payload: { message: "too many bad tool calls", facetId: ctx.facetId } });
           return cfg.fallback(board);
         }
       }
@@ -140,6 +161,6 @@ export async function runAgent(
     }
   }
 
-  await emit({ role, type: "phase", payload: { status: "fallback" } });
+  await emit({ role, type: "phase", payload: { status: "fallback", facetId: ctx.facetId } });
   return cfg.fallback(board);
 }

@@ -4,6 +4,8 @@ import { loadProjectData } from "@/lib/projectData";
 import Workspace from "@/components/Workspace";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function ProjectPage({ params }: { params: { id: string } }) {
   const admin = createAdminClient();

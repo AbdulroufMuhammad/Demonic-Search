@@ -4,8 +4,11 @@ import DesignSystemsClient from "@/components/DesignSystemsClient";
 import { DEFAULT_DS, fromRow } from "@/lib/designSystems";
 
 // No per-request auth call remains to force dynamic rendering, and this
-// page must never be frozen at build time (it lists live projects/systems).
+// page must never be frozen at build time (it lists live projects/systems),
+// nor served from a cached fetch — see the matching note on app/page.tsx.
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function DesignSystemsPage() {
   const admin = createAdminClient();
