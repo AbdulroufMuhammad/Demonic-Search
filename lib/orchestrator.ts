@@ -3,8 +3,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { Board } from "@/lib/board";
 import { runAgent } from "@/lib/agents/runAgent";
 import { verifyCitations } from "@/lib/citations";
-import { getTemplate } from "@/lib/templates";
+import { getTemplate, type Template } from "@/lib/templates";
 import { makeEmitter, type AgentEvent, type Emit } from "@/lib/events";
+import { chat } from "@/lib/gateway";
 
 // Kept small on purpose: a live run against NVIDIA's API showed each
 // reasoning-model call takes ~20-40s, and the whole run has to fit inside
@@ -17,6 +18,50 @@ const CONCURRENCY = 3;
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const say = (emit: Emit, text: string) => emit({ role: "orchestrator", type: "say", payload: { text } });
+
+function safeJson(content: string): any {
+  const match = content.match(/\{[\s\S]*\}/);
+  try {
+    return JSON.parse(match ? match[0] : content);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A cheap single-shot check before the real pipeline starts: is the goal
+ * specific enough to act on, or too thin ("Hi", a bare greeting, no real
+ * topic) to research/write without guessing? If it needs clarifying, asks
+ * one question in chat and pauses the project at status "needs_input"
+ * instead of burning the search/token budget on a guess. Runs once per
+ * project — runProject skips it when resuming from needs_input. Fails open
+ * (proceeds as if clear) on a gateway error, so a flaky check never blocks
+ * a real run.
+ */
+async function checkClarify(db: SupabaseClient, projectId: string, goal: string, template: Template, emit: Emit): Promise<boolean> {
+  let parsed: any;
+  try {
+    const r = await chat("glm-flash", {
+      messages: [
+        {
+          role: "system",
+          content: `You are about to produce a ${template.label.toLowerCase()} from a user's request. Decide if the request gives you enough to act on, or if it's too thin to do anything with beyond guessing (a bare greeting, a single ambiguous word, no real subject at all). Be lenient — a short but specific topic is clear enough; only flag requests with no real content. Reply with ONLY JSON: {"clear":true} or {"clear":false,"question":"one short, specific question that would unblock it"}.`,
+        },
+        { role: "user", content: goal },
+      ],
+    });
+    parsed = safeJson(r.content);
+  } catch {
+    return false;
+  }
+  if (parsed?.clear === false && typeof parsed.question === "string" && parsed.question.trim()) {
+    await say(emit, parsed.question.trim());
+    await db.from("projects").update({ status: "needs_input", updated_at: new Date().toISOString() }).eq("id", projectId);
+    await emit({ type: "done", payload: {} });
+    return true;
+  }
+  return false;
+}
 
 /** User messages sent after the goal (e.g. while the run was going) become extra Writer instructions. */
 async function queuedInstructions(db: SupabaseClient, projectId: string) {
@@ -205,8 +250,32 @@ export async function runDirect(
 }
 
 export async function runProject(db: SupabaseClient, projectId: string, onEvent?: (e: AgentEvent) => void) {
-  const { data: project } = await db.from("projects").select("template").eq("id", projectId).single();
+  const { data: project } = await db.from("projects").select("template, status, goal").eq("id", projectId).single();
   const template = getTemplate(project?.template ?? "blank");
+
+  if (project?.status !== "needs_input") {
+    const emit = makeEmitter(db, projectId, onEvent);
+    const paused = await checkClarify(db, projectId, project?.goal ?? "", template, emit);
+    if (paused) return;
+  } else {
+    // Resuming after the user answered: fold the reply into the goal so
+    // every role downstream — the Planner first — sees the fuller picture,
+    // not just the original thin prompt.
+    const { data: msgs } = await db
+      .from("messages")
+      .select("content")
+      .eq("project_id", projectId)
+      .eq("role", "user")
+      .order("created_at");
+    const answer = msgs?.[msgs.length - 1]?.content;
+    if (answer) {
+      await db
+        .from("projects")
+        .update({ goal: `${project.goal ?? ""}\n\nAdditional detail from the user: ${answer}` })
+        .eq("id", projectId);
+    }
+  }
+
   await db.from("projects").update({ status: "running" }).eq("id", projectId);
   try {
     return template.research

@@ -214,6 +214,10 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
       return;
     }
     if (!t) return;
+    if (project.status === "needs_input") {
+      startRun(t);
+      return;
+    }
     if (running) {
       queueMessage(t);
       return;
@@ -259,7 +263,9 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
         ? { label: "Ready", color: "var(--text)", dot: "var(--accent)" }
         : project.status === "error"
           ? { label: "Error", color: "var(--danger)", dot: "var(--danger)" }
-          : { label: "Not started", color: "var(--muted)", dot: "var(--muted)" };
+          : project.status === "needs_input"
+            ? { label: "Needs your input", color: "var(--accent)", dot: "var(--accent)" }
+            : { label: "Not started", color: "var(--muted)", dot: "var(--muted)" };
 
   const openGap = board.gaps.find((g) => !g.resolved);
   const finalChips =
@@ -312,25 +318,31 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
         chat={chat}
         onChat={setChat}
         onSend={sendChat}
-        sendDisabled={project.status === "idle" ? false : running || !chat.trim()}
+        /* Not gated on `running`: mid-run sends queue for the Writer (see sendChat/queueMessage) —
+           only an empty box should ever disable Send. */
+        sendDisabled={project.status === "idle" ? false : !chat.trim()}
         sendLabel={project.status === "idle" ? "Start ↑" : "↑"}
         target={target}
         onClearTarget={() => setTarget(null)}
         hint={
           project.status === "idle"
             ? "Send starts the research run"
-            : running
-              ? "Messages queue for the Writer"
-              : target
-                ? "Commenting on an element"
-                : "↵ to send"
+            : project.status === "needs_input"
+              ? "Answer to continue"
+              : running
+                ? "Messages queue for the Writer"
+                : target
+                  ? "Commenting on an element"
+                  : "↵ to send"
         }
         placeholder={
-          target
-            ? "Describe the change to this element…"
-            : project.status === "ready"
-              ? "Ask for changes, or select an element with Inspect"
-              : "Wait for the run, or add instructions…"
+          project.status === "needs_input"
+            ? "Type your answer…"
+            : target
+              ? "Describe the change to this element…"
+              : project.status === "ready"
+                ? "Ask for changes, or select an element with Inspect"
+                : "Wait for the run, or add instructions…"
         }
         onBrand={() => router.push("/")}
       />
@@ -369,7 +381,9 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
                   <span className="l2" />
                   <span className="l3" />
                 </div>
-                <p className="writing-caption">The Writer starts once research is verified.</p>
+                <p className="writing-caption">
+                  {project.status === "needs_input" ? "Answer in chat to continue." : "The Writer starts once research is verified."}
+                </p>
               </div>
             </div>
           )}

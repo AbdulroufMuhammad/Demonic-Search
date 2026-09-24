@@ -10,8 +10,10 @@ const STATUS_LABEL: Record<string, string> = {
   running: "Researching",
   ready: "Ready",
   error: "Error",
+  needs_input: "Needs your input",
 };
-const statusColor = (s: string) => (s === "ready" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)");
+const statusColor = (s: string) =>
+  s === "ready" || s === "needs_input" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)";
 
 // Lists live projects/design systems — must never be frozen at build time.
 export const dynamic = "force-dynamic";
