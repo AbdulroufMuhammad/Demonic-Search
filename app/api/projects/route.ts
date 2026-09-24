@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 
+// Auth is disabled for now (single-user/dev mode) — every request runs
+// through the service-role client instead of a signed-in session.
 export async function GET(req: Request) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const supabase = createAdminClient();
 
   const { searchParams } = new URL(req.url);
   const cursor = searchParams.get("cursor");
@@ -21,9 +21,7 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const supabase = createAdminClient();
 
   const body = await req.json();
   const { prompt, template = "blank", model_profile = "quality", design_system_id = null } = body;
@@ -34,7 +32,6 @@ export async function POST(req: Request) {
   const { data: project, error } = await supabase
     .from("projects")
     .insert({
-      owner_id: auth.user.id,
       title: prompt.slice(0, 80),
       template,
       model_profile,

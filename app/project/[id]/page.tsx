@@ -1,11 +1,11 @@
-import { redirect, notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { notFound } from "next/navigation";
+import { createAdminClient } from "@/lib/supabase/admin";
 import Workspace from "@/components/Workspace";
 
+export const dynamic = "force-dynamic";
+
 export default async function ProjectPage({ params }: { params: { id: string } }) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) redirect("/login");
+  const supabase = createAdminClient();
 
   const { data: project } = await supabase.from("projects").select("*").eq("id", params.id).single();
   if (!project) notFound();

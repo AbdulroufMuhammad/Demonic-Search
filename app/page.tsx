@@ -1,12 +1,13 @@
-import { redirect } from "next/navigation";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import Composer from "@/components/Composer";
 
+export const dynamic = "force-dynamic";
+
+// Auth is disabled for now (single-user/dev mode) — every request runs
+// through the service-role client instead of a signed-in session.
 export default async function HomePage() {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) redirect("/login");
+  const supabase = createAdminClient();
 
   const { data: projects } = await supabase
     .from("projects")
@@ -21,7 +22,6 @@ export default async function HomePage() {
           Demonic Search
           <small>Research and artifact engine · Supabase</small>
         </div>
-        <span style={{ color: "var(--muted)", fontSize: 13 }}>{auth.user.email}</span>
       </div>
 
       <h1 className="title">What should we create?</h1>
