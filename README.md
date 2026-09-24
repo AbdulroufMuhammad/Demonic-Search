@@ -6,9 +6,11 @@ finished HTML artifact (document, slides, diagram, or a cited research
 report) onto a live canvas, exportable to PDF or standalone HTML.
 
 It runs on OpenAI-compatible chat-completions endpoints (NVIDIA NIM /
-DeepSeek) over raw HTTP — no vendor SDK — and uses **Supabase** for auth,
-the project/message database, the shared agent blackboard (sources, claims,
-gaps), and the artifact file store (Storage).
+DeepSeek) over raw HTTP — no vendor SDK — and uses **Supabase** for the
+project/message database, the shared agent blackboard (sources, claims,
+gaps), and the artifact file store (Storage). There are no user accounts:
+every project is open to whoever has its URL, and the app talks to Supabase
+entirely through the service-role client.
 
 This implements the architecture from the attached research/build guide,
 scoped to a working core + research pipeline (guide §§1–8, roughly the
@@ -18,10 +20,12 @@ scoped to a working core + research pipeline (guide §§1–8, roughly the
 
 - **Client** — Next.js App Router. Home screen (composer + template picker +
   history), a per-project workspace with a chat/event log and a sandboxed
-  `<iframe>` canvas.
-- **App API** — Next.js route handlers under `app/api/*`, backed by Supabase
-  Auth (magic link) and Postgres via Row Level Security (every table scoped
-  to `owner_id` / project ownership).
+  `<iframe>` canvas, plus a clean read-only report view at `/p/[id]`.
+- **App API** — Next.js route handlers under `app/api/*`. No auth: every
+  route resolves a project through the Supabase service-role client
+  (`lib/access.ts`) and returns 404 if it doesn't exist. Nothing scopes a
+  project to a user — the `owner_id` columns are unused, kept only so the
+  schema doesn't need another migration if accounts come back later.
 - **Orchestrator** (`lib/orchestrator.ts`, `lib/agents/*`) — a blackboard
   (`lib/board.ts`) plus deterministic control flow: Planner → parallel
   Researchers → citation check → Critic → loop on high-priority gaps →
@@ -49,7 +53,9 @@ migrated with the schema below (see `supabase/migrations/0001_init.sql`):
   bucket, public-read / service-role-write)
 - `events` (append-only agent event log, also streamed live over SSE)
 
-RLS is enabled on every table, scoped to the authenticated owner.
+RLS is still defined on every table (scoped to `owner_id`), but the app
+itself never hits it — every request goes through the service-role client,
+which bypasses RLS by design. It's dormant, not enforced.
 
 ## Setup
 
@@ -61,18 +67,23 @@ npm install
 npm run dev
 ```
 
-Sign in with a magic link, describe what to build, pick a template (Research
+No sign-in: describe what to build on Home, pick a template (Research
 enables the citation pipeline), and submit. The workspace opens and starts
-streaming the agent run.
+streaming the agent run. Anyone with a project's URL can open, run, chat
+with, or edit it — there's no login and no ownership check.
 
 ## What's implemented vs. scoped out
 
 Implemented: gateway + streaming tool calls, agent loop, blackboard on
 Supabase, Tavily search/extract with source registry + citation checker,
 Planner/Researcher/Critic/Writer/Verifier roles, budget guard, project
-history, sandboxed canvas, HTML + PDF export.
+history, sandboxed canvas, HTML + PDF export, a research report laid out
+from the board (citations, margin source notes, sources list) rather than
+free-form Writer HTML, an Inspector for direct text/size/spacing edits and
+Writer-routed edits on cited text, design systems (seeded starters plus
+user-created ones) that drive a report's colors and fonts, and a read-only
+share link.
 
-Not implemented (see the guide's Wk 13+ "Refinement" milestone): inline
-canvas comments/direct edits, PPTX export, design-system ingestion from
-uploaded files, sharing/collaboration, thumbnails. These are natural next
-steps on top of the same blackboard and file-tool primitives.
+Not implemented (see the guide's Wk 13+ "Refinement" milestone): PPTX
+export, design-system ingestion from uploaded files (the drop zone on
+Design systems is a placeholder), thumbnails.

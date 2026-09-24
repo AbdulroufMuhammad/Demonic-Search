@@ -1,13 +1,10 @@
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { fromRow } from "@/lib/designSystems";
 
 export async function GET() {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return Response.json({ error: "unauthenticated" }, { status: 401 });
-  // RLS returns the seeded global systems (owner_id null) plus this user's own.
-  // Seeded ones first, each group oldest-first so newly created systems land at the end.
-  const { data, error } = await supabase
+  const admin = createAdminClient();
+  // Seeded (owner_id null) systems first, each group oldest-first so newly created ones land at the end.
+  const { data, error } = await admin
     .from("design_systems")
     .select("*")
     .order("owner_id", { ascending: true, nullsFirst: true })
@@ -19,10 +16,7 @@ export async function GET() {
 const HEX = /^#[0-9a-f]{6}$/i;
 
 export async function POST(req: Request) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return Response.json({ error: "unauthenticated" }, { status: 401 });
-
+  const admin = createAdminClient();
   const body = await req.json();
   const name = String(body.name ?? "").trim() || "Untitled system";
   const colors = (Array.isArray(body.colors) ? body.colors : [])
@@ -34,10 +28,12 @@ export async function POST(req: Request) {
     .slice(0, 4)
     .map((f: any) => ({ role: String(f.role ?? "Body").slice(0, 40), stack: String(f.stack).slice(0, 120) }));
 
-  const { data, error } = await supabase
+  // There are no accounts, so every design system is shared — created as a
+  // global (owner_id null) row, same as the seeded starters.
+  const { data, error } = await admin
     .from("design_systems")
     .insert({
-      owner_id: auth.user.id,
+      owner_id: null,
       name,
       tokens: {
         colors: colors.length ? colors : [

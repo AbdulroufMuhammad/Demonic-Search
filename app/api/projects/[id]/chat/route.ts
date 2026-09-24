@@ -1,4 +1,4 @@
-import { getProjectAccess, denied } from "@/lib/access";
+import { getProject, notFoundResponse } from "@/lib/access";
 import { runEdit } from "@/lib/orchestrator";
 import { sseResponse } from "@/lib/sse";
 
@@ -7,9 +7,9 @@ export const maxDuration = 300;
 
 /** A chat message on a finished artifact: the Writer edits index.html and replies. */
 export async function POST(req: Request, { params }: { params: { id: string } }) {
-  const res = await getProjectAccess(params.id);
-  if (!res.ok) return denied(res.status);
-  const { admin, project } = res.access;
+  const res = await getProject(params.id);
+  if (!res.ok) return notFoundResponse();
+  const { admin, project } = res;
   if (project.status === "running") return Response.json({ error: "a run is in progress" }, { status: 409 });
 
   const { message, target } = await req.json();

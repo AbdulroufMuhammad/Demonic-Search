@@ -8,11 +8,9 @@ type RecentItem = { id: string; title: string };
  */
 export default function Sidebar({
   active,
-  email,
   recent = [],
 }: {
   active: "home" | "ds";
-  email: string;
   recent?: RecentItem[];
 }) {
   return (
@@ -41,10 +39,6 @@ export default function Sidebar({
           </div>
         </div>
       )}
-      <div className="sidebar-user">
-        <span className="avatar">{email[0]?.toUpperCase() ?? "?"}</span>
-        <span className="sidebar-email">{email}</span>
-      </div>
     </aside>
   );
 }

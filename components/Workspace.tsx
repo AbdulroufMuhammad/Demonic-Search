@@ -49,7 +49,7 @@ async function streamSSE(url: string, body: unknown, onEvent: (e: any) => void) 
   }
 }
 
-export default function Workspace({ initial, isOwner }: { initial: ProjectData; isOwner: boolean }) {
+export default function Workspace({ initial }: { initial: ProjectData }) {
   const router = useRouter();
   const template = getTemplate(initial.project.template);
 
@@ -391,16 +391,6 @@ export default function Workspace({ initial, isOwner }: { initial: ProjectData; 
         <ShareDialog
           projectId={project.id}
           title={project.title}
-          access={project.share_access}
-          isOwner={isOwner}
-          onAccessChange={async (access) => {
-            setProject((p) => ({ ...p, share_access: access }));
-            await fetch(`/api/projects/${project.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ share_access: access }),
-            });
-          }}
           onClose={() => setShareOpen(false)}
           onExport={(format) => window.open(`/api/projects/${project.id}/export?format=${format}&path=index.html`, "_blank")}
         />

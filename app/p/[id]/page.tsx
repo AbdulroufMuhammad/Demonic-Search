@@ -1,28 +1,22 @@
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadBoard, readArtifact } from "@/lib/projectData";
 import PublicReport from "@/components/PublicReport";
 
 /**
- * The public share link. Unlike /project/[id], this never requires sign-in —
- * "Anyone with the link can view" is the point — so it's gated purely on
- * share_access (checked here, not by RLS) via the admin client.
+ * A clean, read-only view of a report — no chat/board/inspect chrome — for
+ * sharing or embedding a link to just the artifact. There are no accounts,
+ * so the full interactive workspace at /project/[id] is equally open to
+ * anyone with that URL; this page exists for a nicer reading link, not for
+ * access control.
  */
+export const dynamic = "force-dynamic";
+
 export default async function PublicProjectPage({ params }: { params: { id: string } }) {
   const admin = createAdminClient();
-  const { data: project } = await admin
-    .from("projects")
-    .select("id, owner_id, title, status, share_access")
-    .eq("id", params.id)
-    .single();
+  const { data: project } = await admin.from("projects").select("id, title, status").eq("id", params.id).single();
   if (!project) notFound();
-
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (auth.user?.id === project.owner_id) redirect(`/project/${params.id}`);
-  if (project.share_access === "private") notFound();
 
   const [board, artifact] = await Promise.all([loadBoard(admin, params.id), readArtifact(admin, params.id)]);
 
@@ -37,7 +31,9 @@ export default async function PublicProjectPage({ params }: { params: { id: stri
           <span className="file-label">{project.title}</span>
         </div>
         <div className="canvas-toolbar-right">
-          <span className="file-label">{project.share_access === "edit" ? "Anyone with the link can edit" : "Anyone with the link can view"}</span>
+          <Link href={`/project/${params.id}`} className="file-label">
+            Open in workspace →
+          </Link>
         </div>
       </div>
       {project.status === "ready" && artifact ? (

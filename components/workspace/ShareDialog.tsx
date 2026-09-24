@@ -2,26 +2,14 @@
 
 import { useState } from "react";
 
-const ACCESS = [
-  { id: "private", l: "Private", sub: "Only you can open it" },
-  { id: "view", l: "Anyone with the link can view", sub: "Read-only, citations stay clickable" },
-  { id: "edit", l: "Anyone with the link can edit", sub: "They can comment and prompt the Writer" },
-] as const;
-
 export default function ShareDialog({
   projectId,
   title,
-  access,
-  isOwner,
-  onAccessChange,
   onClose,
   onExport,
 }: {
   projectId: string;
   title: string;
-  access: string;
-  isOwner: boolean;
-  onAccessChange: (access: string) => void;
   onClose: () => void;
   onExport: (format: "pdf" | "html") => void;
 }) {
@@ -30,7 +18,6 @@ export default function ShareDialog({
   const shareLink = typeof window !== "undefined" ? `${window.location.origin}/p/${projectId}` : `/p/${projectId}`;
 
   function copyLink() {
-    if (access === "private") return;
     navigator.clipboard?.writeText(shareLink).catch(() => {});
     setCopied(true);
   }
@@ -52,30 +39,12 @@ export default function ShareDialog({
               ×
             </button>
           </div>
-          <div className="access-list">
-            {ACCESS.map((a) => (
-              <button
-                key={a.id}
-                className="access-item"
-                disabled={!isOwner}
-                onClick={() => {
-                  onAccessChange(a.id);
-                  setCopied(false);
-                }}
-                style={!isOwner ? { cursor: "default", opacity: 0.7 } : undefined}
-              >
-                <span className="access-radio" style={{ borderColor: access === a.id ? "var(--accent)" : "var(--line)" }}>
-                  <span className="access-radio-dot" style={{ background: access === a.id ? "var(--accent)" : "transparent" }} />
-                </span>
-                <span className="access-text">
-                  <span className="l">{a.l}</span>
-                  <span className="sub">{a.sub}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="link-row" style={{ opacity: access === "private" ? 0.45 : 1 }}>
-            <span className="link-box">{access === "private" ? "Link sharing is off" : shareLink}</span>
+          <p style={{ margin: 0, fontSize: 13, color: "var(--muted)" }}>
+            Anyone with this link can open a read-only view of the report — citations stay clickable. The workspace
+            itself (chat, board, inspect) is open to anyone with its own link too.
+          </p>
+          <div className="link-row">
+            <span className="link-box">{shareLink}</span>
             <button className="btn-copy" onClick={copyLink}>
               {copied ? "Copied ✓" : "Copy link"}
             </button>

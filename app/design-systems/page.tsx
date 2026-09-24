@@ -1,17 +1,17 @@
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import Sidebar from "@/components/Sidebar";
 import DesignSystemsClient from "@/components/DesignSystemsClient";
 import { DEFAULT_DS, fromRow } from "@/lib/designSystems";
 
-export default async function DesignSystemsPage() {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) redirect("/login");
+// No per-request auth call remains to force dynamic rendering, and this
+// page must never be frozen at build time (it lists live projects/systems).
+export const dynamic = "force-dynamic";
 
+export default async function DesignSystemsPage() {
+  const admin = createAdminClient();
   const [{ data: projects }, { data: dsRows }] = await Promise.all([
-    supabase.from("projects").select("id, title").order("updated_at", { ascending: false }).limit(6),
-    supabase
+    admin.from("projects").select("id, title").order("updated_at", { ascending: false }).limit(6),
+    admin
       .from("design_systems")
       .select("*")
       .order("owner_id", { ascending: true, nullsFirst: true })
@@ -21,7 +21,7 @@ export default async function DesignSystemsPage() {
 
   return (
     <div className="app-shell">
-      <Sidebar active="ds" email={auth.user.email ?? ""} recent={projects ?? []} />
+      <Sidebar active="ds" recent={projects ?? []} />
       <main className="ds-main">
         <DesignSystemsClient initialSystems={systems} />
       </main>

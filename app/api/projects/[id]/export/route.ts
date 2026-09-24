@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getProjectAccess, denied } from "@/lib/access";
+import { getProject, notFoundResponse } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -7,9 +7,9 @@ export const maxDuration = 60;
 // PDF export renders the same file the canvas shows, from its isolated
 // public storage URL, via headless Chromium (guide §7/§8).
 export async function GET(req: Request, { params }: { params: { id: string } }) {
-  const res = await getProjectAccess(params.id);
-  if (!res.ok) return denied(res.status);
-  const supabase = res.access.admin;
+  const res = await getProject(params.id);
+  if (!res.ok) return notFoundResponse();
+  const supabase = res.admin;
 
   const { searchParams } = new URL(req.url);
   const format = searchParams.get("format") ?? "pdf";

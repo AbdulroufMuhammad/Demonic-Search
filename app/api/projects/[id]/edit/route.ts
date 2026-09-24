@@ -1,4 +1,4 @@
-import { getProjectAccess, denied } from "@/lib/access";
+import { getProject, notFoundResponse } from "@/lib/access";
 import { readArtifact } from "@/lib/projectData";
 import { makeFileTools } from "@/lib/tools/files";
 import { applyElementEdit } from "@/lib/report/finalize";
@@ -7,9 +7,9 @@ export const dynamic = "force-dynamic";
 
 /** Inspector direct edits: text of uncited elements, and size / line height / space after. */
 export async function POST(req: Request, { params }: { params: { id: string } }) {
-  const res = await getProjectAccess(params.id);
-  if (!res.ok) return denied(res.status);
-  const { admin } = res.access;
+  const res = await getProject(params.id);
+  if (!res.ok) return notFoundResponse();
+  const { admin } = res;
   const { path = "index.html", edits } = await req.json();
   if (!Array.isArray(edits) || !edits.length) return Response.json({ error: "edits are required" }, { status: 400 });
 

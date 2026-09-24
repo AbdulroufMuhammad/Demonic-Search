@@ -1,4 +1,4 @@
-import { getProjectAccess, denied } from "@/lib/access";
+import { getProject, notFoundResponse } from "@/lib/access";
 import { runProject } from "@/lib/orchestrator";
 import { sseResponse } from "@/lib/sse";
 
@@ -6,9 +6,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 export async function POST(req: Request, { params }: { params: { id: string } }) {
-  const res = await getProjectAccess(params.id);
-  if (!res.ok) return denied(res.status);
-  const { admin, project } = res.access;
+  const res = await getProject(params.id);
+  if (!res.ok) return notFoundResponse();
+  const { admin, project } = res;
   if (project.status === "running") return Response.json({ error: "already running" }, { status: 409 });
 
   // Optional instructions typed before the run starts; the Writer reads them.

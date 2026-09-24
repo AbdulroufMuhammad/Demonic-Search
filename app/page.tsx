@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import Sidebar from "@/components/Sidebar";
 import Composer from "@/components/Composer";
 import { getTemplate } from "@/lib/templates";
@@ -14,18 +13,18 @@ const STATUS_LABEL: Record<string, string> = {
 };
 const statusColor = (s: string) => (s === "ready" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)");
 
-export default async function HomePage({ searchParams }: { searchParams: { ds?: string } }) {
-  const supabase = createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) redirect("/login");
+// Lists live projects/design systems — must never be frozen at build time.
+export const dynamic = "force-dynamic";
 
+export default async function HomePage({ searchParams }: { searchParams: { ds?: string } }) {
+  const admin = createAdminClient();
   const [{ data: projects }, { data: dsRows }] = await Promise.all([
-    supabase
+    admin
       .from("projects")
       .select("id, title, template, status, updated_at")
       .order("updated_at", { ascending: false })
       .limit(12),
-    supabase
+    admin
       .from("design_systems")
       .select("*")
       .order("owner_id", { ascending: true, nullsFirst: true })
@@ -35,7 +34,7 @@ export default async function HomePage({ searchParams }: { searchParams: { ds?: 
 
   return (
     <div className="app-shell">
-      <Sidebar active="home" email={auth.user.email ?? ""} recent={(projects ?? []).slice(0, 6).map((p) => ({ id: p.id, title: p.title }))} />
+      <Sidebar active="home" recent={(projects ?? []).slice(0, 6).map((p) => ({ id: p.id, title: p.title }))} />
       <main className="home-main">
         <div className="home-col">
           <h1 className="home-h1">What should we find out?</h1>
