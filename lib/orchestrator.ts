@@ -6,8 +6,12 @@ import { verifyCitations } from "@/lib/citations";
 import { getTemplate } from "@/lib/templates";
 import { makeEmitter, type AgentEvent } from "@/lib/events";
 
-const MAX_ROUNDS = 3;
-const CONCURRENCY = 4;
+// Kept small on purpose: each agent call to a reasoning model takes ~20-40s,
+// and the whole run has to fit inside one Vercel function invocation
+// (300s). One critique round and 3 facets keeps a typical run well under that.
+const MAX_ROUNDS = 1;
+const MAX_FACETS = 3;
+const CONCURRENCY = 3;
 
 /**
  * The collaboration algorithm (guide §5): Plan → fan out Researchers →
@@ -27,7 +31,9 @@ export async function runResearch(
   board.plan = await runAgent(db, "planner", board, template, board.goal, emit);
   await board.checkpoint();
 
-  let queue = (board.plan?.facets ?? []).map((f: any) => ({ facetId: f.id, question: f.question }));
+  let queue = (board.plan?.facets ?? [])
+    .slice(0, MAX_FACETS)
+    .map((f: any) => ({ facetId: f.id, question: f.question }));
   const limit = pLimit(CONCURRENCY);
 
   for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
