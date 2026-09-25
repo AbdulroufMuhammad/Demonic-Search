@@ -9,11 +9,12 @@ async function probe(url: string, key: string, model: string) {
   try {
     const res = await fetch(`${url}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-      signal: AbortSignal.timeout(15000),
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: true }),
+      signal: AbortSignal.timeout(25000),
     });
-    const text = await res.text();
+    // Mirror the real gateway: decide from the response status/headers, don't wait on the stream body.
+    const text = res.ok ? "" : await res.text();
     return { status: res.status, ok: res.ok, body: text.slice(0, 300) };
   } catch (e) {
     return { status: null, ok: false, body: e instanceof Error ? e.message : String(e) };
