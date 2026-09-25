@@ -85,6 +85,14 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout>>();
   const boardRefreshTimer = useRef<ReturnType<typeof setTimeout>>();
   const started = useRef(false);
+  // Set by a "continue" event just before the stream ends: the run paused
+  // itself on purpose (its own invocation ran low on time, not a failure —
+  // see pause() in lib/orchestrator.ts) and wants picking back up right
+  // away, rather than being reported as finished. Capped so a goal that
+  // genuinely can't complete doesn't retry forever.
+  const willContinue = useRef(false);
+  const continuations = useRef(0);
+  const MAX_CONTINUATIONS = 8;
 
   // ----- data refresh -----
   async function resync() {
@@ -124,15 +132,24 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll if we loaded mid-run (e.g. a page reload) instead of racing the /run endpoint again.
+  // Poll if we loaded mid-run (e.g. a page reload) instead of racing the
+  // /run endpoint again. If the project stops heartbeating (updated_at
+  // stalls) for a couple of ticks, the invocation that was working on it
+  // almost certainly paused itself (see pause() in lib/orchestrator.ts) or
+  // died right at its own deadline with nobody left to resume it — pick it
+  // back up instead of polling forever.
   useEffect(() => {
     if (project.status !== "running") return;
     setRunning(true);
+    let lastUpdatedAt = project.updated_at;
+    let staleTicks = 0;
+    let handedOff = false;
     const iv = setInterval(async () => {
       const res = await fetch(`/api/projects/${project.id}`);
       if (!res.ok) return;
       const data: ProjectData = await res.json();
       if (data.project.status !== "running") {
+        handedOff = true;
         clearInterval(iv);
         setRunning(false);
         setProject(data.project);
@@ -141,6 +158,22 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
         setBoard(data.board);
         setReportVersion(data.files.find((f) => f.path === "index.html")?.version ?? 0);
         if (data.project.status === "ready") fetchReport();
+        return;
+      }
+      if (data.project.updated_at === lastUpdatedAt) {
+        staleTicks += 1;
+      } else {
+        staleTicks = 0;
+        lastUpdatedAt = data.project.updated_at;
+      }
+      if (staleTicks >= 2 && !handedOff && continuations.current < MAX_CONTINUATIONS) {
+        handedOff = true;
+        clearInterval(iv);
+        setEvents(data.events);
+        setMessages(data.messages);
+        setBoard(data.board);
+        continuations.current += 1;
+        streamSSE(`/api/projects/${project.id}/run`, { resume: true }, onLiveEvent);
       }
     }, 3000);
     return () => clearInterval(iv);
@@ -154,7 +187,17 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   }, [running, runStart]);
 
   function onLiveEvent(e: any) {
+    if (e.type === "continue") {
+      willContinue.current = true;
+      return;
+    }
     if (e.type === "stream-end") {
+      if (willContinue.current && continuations.current < MAX_CONTINUATIONS) {
+        willContinue.current = false;
+        continuations.current += 1;
+        streamSSE(`/api/projects/${project.id}/run`, { resume: true }, onLiveEvent);
+        return;
+      }
       setRunning(false);
       setThinkingText("");
       resync().then(() => {
@@ -184,6 +227,8 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
 
   async function startRun(message?: string) {
     if (running) return;
+    willContinue.current = false;
+    continuations.current = 0;
     setRunning(true);
     setRunStart(Date.now());
     setElapsed(0);

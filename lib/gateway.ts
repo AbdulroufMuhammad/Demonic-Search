@@ -104,6 +104,12 @@ export class GatewayError extends Error {
   }
 }
 
+// The cap on a single provider attempt. Kept below the per-role budget a
+// caller passes via `deadline` so a hung primary-model call still leaves
+// room to try the fallback within the same overall budget, instead of
+// eating all of it on one attempt.
+const PER_ATTEMPT_TIMEOUT_MS = 45_000;
+
 function baseFor(provider: ModelConfig["provider"]) {
   if (provider === "nvidia") {
     return {
@@ -123,15 +129,16 @@ async function chatOnce(
     messages: ChatMessage[];
     tools?: ToolSchema[];
     onToken?: (t: string) => void;
-    signal?: AbortSignal;
+    deadline: number;
   }
 ): Promise<ChatResult> {
   const m = MODELS[modelKey];
   const { url, key } = baseFor(m.provider);
+  const timeoutMs = Math.max(1000, Math.min(PER_ATTEMPT_TIMEOUT_MS, opts.deadline - Date.now()));
 
   const res = await fetch(`${url}/chat/completions`, {
     method: "POST",
-    signal: opts.signal,
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
@@ -194,20 +201,28 @@ async function chatOnce(
   return out;
 }
 
-/** Chat with automatic one-shot fallback to the model registry's backup model. */
+/**
+ * Chat with automatic one-shot fallback to the model registry's backup
+ * model — on a server error, and (the common real-world case) on a
+ * provider that's just slow to respond. `deadline` is an absolute epoch ms
+ * shared by both attempts, so a hung primary call can't starve the
+ * fallback of its own shot within the caller's overall time budget.
+ */
 export async function chat(
   modelKey: ModelKey,
   opts: {
     messages: ChatMessage[];
     tools?: ToolSchema[];
     onToken?: (t: string) => void;
-    signal?: AbortSignal;
+    deadline: number;
   }
 ): Promise<ChatResult> {
   try {
     return await chatOnce(modelKey, opts);
   } catch (e) {
-    if (e instanceof GatewayError && (e.status === 429 || e.status >= 500)) {
+    const timedOut = (e as any)?.name === "TimeoutError";
+    const serverError = e instanceof GatewayError && (e.status === 429 || e.status >= 500);
+    if ((timedOut || serverError) && opts.deadline - Date.now() > 1000) {
       const fb = FALLBACKS[modelKey];
       if (fb !== modelKey) return chatOnce(fb, opts);
     }

@@ -28,6 +28,7 @@ export type ProjectData = {
     template: string;
     status: string;
     share_access: string;
+    updated_at: string;
   };
   files: FileEntry[];
   events: StoredEvent[];
@@ -104,6 +105,7 @@ export async function loadProjectData(db: SupabaseClient, project: any): Promise
       template: project.template,
       status: project.status,
       share_access: project.share_access ?? "private",
+      updated_at: project.updated_at,
     },
     files,
     events: events ?? [],

@@ -11,25 +11,26 @@ import { finalizeArtifact } from "@/lib/report/finalize";
 type Tool = (args: any, board: Board) => Promise<unknown>;
 /**
  * `deadline` is the pipeline-wide wall-clock budget (epoch ms; see
- * lib/orchestrator.ts). A single stalled call is bounded by MODEL_TIMEOUT_MS
- * below, but several roles retrying in sequence (each individually within
- * that cap) can still add up past the route's own 300s function limit —
- * observed live: checkClarify + a timed-out Planner + a timed-out Researcher
- * + Critic + a timed-out Writer + Verifier + a Writer retry cost over five
- * minutes of real wall time in one run, and the platform killed the function
- * mid-retry with nothing ever marking the project as failed. Every call here
- * shrinks its own timeout to whatever's left of that shared budget, and
- * skips the call entirely once there's essentially nothing left, instead of
- * finding out the hard way.
+ * lib/orchestrator.ts) — comfortably inside the route's 300s function
+ * limit. A stalled call by itself can't run past it (lib/gateway.ts bounds
+ * every attempt, including its own fallback-model retry, to whatever's left
+ * of it), and the orchestrator checks the same clock before starting a new
+ * phase at all, so a run that's genuinely going to overrun this invocation
+ * pauses cleanly (status stays "running", a "continue" event fires) instead
+ * of grinding out degraded fallbacks against a near-zero budget or getting
+ * killed mid-call by the platform with nothing left to mark it failed.
  */
 export type AgentContext = { facetId?: string; deadline?: number };
 
-// A hard cap per model call, well above the ~20-40s a reasoning-model call
-// has been observed to take (see the note on ROLES in lib/agents/roles.ts).
-// Without this, a stalled provider call hangs silently forever — no error,
-// no event, nothing for the user to see — instead of failing visibly.
-const MODEL_TIMEOUT_MS = 60_000;
+// Without a floor here, a stalled provider call would otherwise hang
+// silently forever — no error, no event, nothing for the user to see —
+// instead of failing visibly. The actual per-attempt cap (and the
+// timeout -> fallback-model switch) lives in lib/gateway.ts, which every
+// attempt shares `deadline` with. A role with no pipeline deadline (e.g. a
+// chat edit, which isn't part of a budgeted run) still gets a reasonable
+// default budget here so its calls stay bounded too.
 const MIN_CALL_MS = 3_000;
+const DEFAULT_CALL_BUDGET_MS = 90_000;
 
 export function artifactTransform(board: Board, template: Template) {
   return (_path: string, content: string) =>
@@ -107,7 +108,7 @@ export async function runAgent(
       await emit({ role, type: "phase", payload: { status: "budget-exhausted", facetId: ctx.facetId } });
       return cfg.fallback(board);
     }
-    const callTimeout = Math.min(MODEL_TIMEOUT_MS, remaining);
+    const callDeadline = ctx.deadline ?? Date.now() + DEFAULT_CALL_BUDGET_MS;
 
     let r;
     try {
@@ -115,17 +116,18 @@ export async function runAgent(
         messages,
         tools: cfg.tools.length ? cfg.tools : undefined,
         onToken: (t) => emit({ role, type: "token", payload: { t, facetId: ctx.facetId } }),
-        signal: AbortSignal.timeout(callTimeout),
+        deadline: callDeadline,
       });
     } catch (e) {
-      // A stalled/unresponsive provider call — stop this agent here and
-      // hand back its fallback rather than hanging the whole run, same
-      // spirit as the BudgetExceeded handling below.
+      // A stalled/unresponsive provider call, even after gateway.ts's own
+      // fallback-model retry — stop this agent here and hand back its
+      // fallback rather than hanging the whole run, same spirit as the
+      // BudgetExceeded handling below.
       const timedOut = (e as any)?.name === "TimeoutError";
       await emit({
         role,
         type: "error",
-        payload: { message: timedOut ? "The model didn't respond in time." : e instanceof Error ? e.message : String(e), facetId: ctx.facetId },
+        payload: { message: timedOut ? "The model (and its fallback) didn't respond in time." : e instanceof Error ? e.message : String(e), facetId: ctx.facetId },
       });
       return cfg.fallback(board);
     }

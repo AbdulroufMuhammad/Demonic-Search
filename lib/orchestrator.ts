@@ -16,10 +16,20 @@ const MAX_ROUNDS = 1;
 const MAX_FACETS = 3;
 const CONCURRENCY = 3;
 
-// The pipeline-wide wall-clock budget (see the note on AgentContext in
-// lib/agents/runAgent.ts): comfortably under the route's 300s limit, leaving
-// margin for DB writes and SSE flush after the last call returns.
+// The pipeline-wide wall-clock budget for one function invocation (see the
+// note on AgentContext in lib/agents/runAgent.ts): comfortably under the
+// route's 300s limit, leaving margin for DB writes and SSE flush after the
+// last call returns. It's a per-invocation budget, not a per-run one — a
+// run that needs more than this just continues in a fresh invocation (see
+// pause() below) with a fresh PIPELINE_DEADLINE_MS of its own.
 const PIPELINE_DEADLINE_MS = 220_000;
+
+// Minimum time left before starting a new phase (planner, a research round,
+// the writer, the verifier) is worth attempting at all. Below this, a phase
+// would either get cut off mid-call or immediately hit runAgent's own
+// budget-exhausted skip and return a degraded fallback — pausing instead
+// means the *next* invocation gets a full, fresh budget to do it properly.
+const PHASE_MARGIN_MS = 20_000;
 
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const say = (emit: Emit, text: string) => emit({ role: "orchestrator", type: "say", payload: { text } });
@@ -48,6 +58,24 @@ async function finish(db: SupabaseClient, projectId: string, emit: Emit, message
     .from("projects")
     .update({ status: ok ? "ready" : "error", updated_at: new Date().toISOString() })
     .eq("id", projectId);
+}
+
+/**
+ * Called instead of finish() when this invocation is running out of its own
+ * wall-clock budget (PIPELINE_DEADLINE_MS) with real work still left — not
+ * when the run has actually failed. Status stays "running" (nothing here
+ * declares success or failure) and a "continue" event tells whichever
+ * client is watching to re-POST /run with resume:true right away; if
+ * nobody's watching (e.g. the tab was closed), Workspace's reload-time poll
+ * notices the project has stopped heartbeating and resumes it itself. Board
+ * state — plan, claims, gaps, any index.html already written — is already
+ * persisted continuously, so the next invocation picks up from here rather
+ * than starting over.
+ */
+async function pause(db: SupabaseClient, projectId: string, emit: Emit, message: string) {
+  await say(emit, message);
+  await emit({ type: "continue", payload: {} });
+  await db.from("projects").update({ updated_at: new Date().toISOString() }).eq("id", projectId);
 }
 
 function safeJson(content: string): any {
@@ -85,7 +113,7 @@ async function checkClarify(db: SupabaseClient, projectId: string, goal: string,
         { role: "user", content: goal },
       ],
       onToken: (t) => emit({ role: "planner", type: "token", payload: { t } }),
-      signal: AbortSignal.timeout(25_000),
+      deadline: Date.now() + 25_000,
     });
     parsed = safeJson(r.content);
   } catch {
@@ -149,32 +177,63 @@ export async function runResearch(
   const board = await Board.load(db, projectId);
   const template = getTemplate(board.template);
   const emit = makeEmitter(db, projectId, onEvent);
+  const hasBudget = () => deadline - Date.now() > PHASE_MARGIN_MS;
 
-  board.plan = await runAgent(db, "planner", board, template, board.goal, emit, { deadline });
-  await board.checkpoint();
+  // A plan already on the board means an earlier invocation got at least
+  // that far before pausing — reuse it rather than re-planning (which would
+  // burn a call and could hand back a different outline than the claims
+  // already gathered were researched against).
+  const resuming = !!board.plan?.facets?.length;
+
+  if (!hasBudget()) {
+    await pause(db, projectId, emit, "Picking this up now — I'll get started in a moment.");
+    return board;
+  }
+
+  if (!resuming) {
+    board.plan = await runAgent(db, "planner", board, template, board.goal, emit, { deadline });
+    await board.checkpoint();
+  }
   const facets = (board.plan?.facets ?? []).slice(0, MAX_FACETS);
-  await say(
-    emit,
-    `I'll split this into ${plural(facets.length, "question")} and research them in parallel. A claim only makes it into the report if I can find its quote in the source page.`
-  );
-  await emit({
-    role: "planner",
-    type: "step",
-    payload: {
-      kind: "plan",
-      detail: `${plural(facets.length, "research question")}`,
-      rows: facets.map((f, i) => ({ k: `Q${i + 1}`, t: f.question, d: "" })),
-    },
-  });
+  if (!resuming) {
+    await say(
+      emit,
+      `I'll split this into ${plural(facets.length, "question")} and research them in parallel. A claim only makes it into the report if I can find its quote in the source page.`
+    );
+    await emit({
+      role: "planner",
+      type: "step",
+      payload: {
+        kind: "plan",
+        detail: `${plural(facets.length, "research question")}`,
+        rows: facets.map((f, i) => ({ k: `Q${i + 1}`, t: f.question, d: "" })),
+      },
+    });
+  } else {
+    await say(emit, "Continuing the research from where I left off.");
+  }
 
-  let queue = facets.map((f) => ({ facetId: f.id, question: f.question }));
+  // Resuming with claims already on the board: only chase the gaps that
+  // were still open, not the whole facet list again. Resuming before any
+  // claims came in (paused mid-plan, or the researchers never got to run)
+  // is indistinguishable from a fresh start — research the full plan.
+  let queue =
+    resuming && board.claims.length
+      ? board.gaps
+          .filter((g) => g.priority === "high")
+          .slice(0, 4)
+          .map((g) => ({ facetId: g.facetId ?? facets[0]?.id ?? "f1", question: g.question }))
+      : facets.map((f) => ({ facetId: f.id, question: f.question }));
   const limit = pLimit(CONCURRENCY);
 
   for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
-    // Soft check, not board.guard(): running out of search budget (or wall-
-    // clock budget) mid-run should stop starting new rounds, not abort the
-    // whole run before the Writer ever sees the claims already gathered.
-    if (board.budget.searchesLeft <= 0 || deadline - Date.now() < 15_000) break;
+    // Real search-budget exhaustion should still fall through to the Writer
+    // with whatever's been gathered, not pause — more time wouldn't help.
+    if (board.budget.searchesLeft <= 0) break;
+    if (!hasBudget()) {
+      await pause(db, projectId, emit, "Still researching — I'll pick this back up in a moment.");
+      return board;
+    }
     await emit({
       role: "orchestrator",
       type: "phase",
@@ -252,12 +311,21 @@ export async function runResearch(
     }
   }
 
+  if (!hasBudget()) {
+    await pause(db, projectId, emit, "Research is done — I'll write the report in a moment.");
+    return board;
+  }
   const writerInput = `Goal: ${board.goal}\nOutline: ${JSON.stringify(
     board.plan?.outline
   )}\nVerified claims (cite by sourceId): ${JSON.stringify(board.claims)}\nSources: ${JSON.stringify(
     Object.fromEntries([...board.sources].map(([id, s]) => [id, { title: s.title, url: s.url }]))
   )}\nOpen gaps: ${JSON.stringify(board.gaps.map((g) => g.question))}${await queuedInstructions(db, projectId)}`;
   await runAgent(db, "writer", board, template, writerInput, emit, { deadline });
+
+  if (!hasBudget()) {
+    await pause(db, projectId, emit, "The draft is on the canvas — I'll finish checking it in a moment.");
+    return board;
+  }
   await verify(db, board, template, emit, deadline);
 
   const open = board.gaps[0]?.question;
@@ -272,7 +340,7 @@ export async function runResearch(
             ? ` I left out ${plural(board.dropped.length, "claim")} because the quote wasn't in the page.`
             : ""
         }${open ? ` Still unanswered: ${open}` : ""}`
-      : "The models were too slow to finish writing the report in time. The research itself is saved — open the board to see what was found, and try again."
+      : "The report couldn't be finished. The research itself is saved — open the board to see what was found, and try again."
   );
   return board;
 }
@@ -287,9 +355,30 @@ export async function runDirect(
   const board = await Board.load(db, projectId);
   const template = getTemplate(board.template);
   const emit = makeEmitter(db, projectId, onEvent);
+  const hasBudget = () => deadline - Date.now() > PHASE_MARGIN_MS;
 
-  await say(emit, `Writing a ${template.label.toLowerCase()} for this. I'll check the page renders before handing it over.`);
-  const w = await runAgent(db, "writer", board, template, board.goal + (await queuedInstructions(db, projectId)), emit, { deadline });
+  // An artifact already on the board means an earlier invocation got the
+  // Writer through before pausing — go straight to verifying it rather than
+  // asking the Writer to redo the whole thing.
+  const resuming = await hasArtifact(db, projectId);
+
+  if (!hasBudget()) {
+    await pause(db, projectId, emit, "Picking this up now — I'll get started in a moment.");
+    return board;
+  }
+
+  let w: any = null;
+  if (!resuming) {
+    await say(emit, `Writing a ${template.label.toLowerCase()} for this. I'll check the page renders before handing it over.`);
+    w = await runAgent(db, "writer", board, template, board.goal + (await queuedInstructions(db, projectId)), emit, { deadline });
+  } else {
+    await say(emit, "Continuing — double-checking the page now.");
+  }
+
+  if (!hasBudget()) {
+    await pause(db, projectId, emit, "The draft is on the canvas — I'll finish checking it in a moment.");
+    return board;
+  }
   await verify(db, board, template, emit, deadline);
 
   const ok = await hasArtifact(db, projectId);
@@ -301,12 +390,17 @@ export async function runDirect(
       ? w?.summary
         ? `${w.summary} It's on the canvas.`
         : "It's on the canvas."
-      : "The models were too slow to finish this in time. Try again, or simplify the request."
+      : "This couldn't be finished. Try again, or simplify the request."
   );
   return board;
 }
 
-export async function runProject(db: SupabaseClient, projectId: string, onEvent?: (e: AgentEvent) => void) {
+export async function runProject(
+  db: SupabaseClient,
+  projectId: string,
+  onEvent?: (e: AgentEvent) => void,
+  opts: { resume?: boolean } = {}
+) {
   const { data: project } = await db.from("projects").select("template, status, goal").eq("id", projectId).single();
   const template = getTemplate(project?.template ?? "blank");
   const wasNeedsInput = project?.status === "needs_input";
@@ -320,26 +414,31 @@ export async function runProject(db: SupabaseClient, projectId: string, onEvent?
   await db.from("projects").update({ status: "running", updated_at: new Date().toISOString() }).eq("id", projectId);
   const deadline = Date.now() + PIPELINE_DEADLINE_MS;
 
-  if (!wasNeedsInput) {
-    const emit = makeEmitter(db, projectId, onEvent);
-    const paused = await checkClarify(db, projectId, project?.goal ?? "", template, emit);
-    if (paused) return;
-  } else {
-    // Resuming after the user answered: fold the reply into the goal so
-    // every role downstream — the Planner first — sees the fuller picture,
-    // not just the original thin prompt.
-    const { data: msgs } = await db
-      .from("messages")
-      .select("content")
-      .eq("project_id", projectId)
-      .eq("role", "user")
-      .order("created_at");
-    const answer = msgs?.[msgs.length - 1]?.content;
-    if (answer) {
-      await db
-        .from("projects")
-        .update({ goal: `${project.goal ?? ""}\n\nAdditional detail from the user: ${answer}` })
-        .eq("id", projectId);
+  // A resume picks a previously-started run back up (see pause() above) —
+  // it was never idle or needs_input, so there's nothing to clarify or fold
+  // in here; runResearch/runDirect read the board state that's already there.
+  if (!opts.resume) {
+    if (!wasNeedsInput) {
+      const emit = makeEmitter(db, projectId, onEvent);
+      const paused = await checkClarify(db, projectId, project?.goal ?? "", template, emit);
+      if (paused) return;
+    } else {
+      // Resuming after the user answered: fold the reply into the goal so
+      // every role downstream — the Planner first — sees the fuller picture,
+      // not just the original thin prompt.
+      const { data: msgs } = await db
+        .from("messages")
+        .select("content")
+        .eq("project_id", projectId)
+        .eq("role", "user")
+        .order("created_at");
+      const answer = msgs?.[msgs.length - 1]?.content;
+      if (answer) {
+        await db
+          .from("projects")
+          .update({ goal: `${project.goal ?? ""}\n\nAdditional detail from the user: ${answer}` })
+          .eq("id", projectId);
+      }
     }
   }
 

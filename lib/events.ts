@@ -6,8 +6,10 @@ export type AgentEvent = {
    * token/phase/tool-call/tool-result/error/done come from the agent loop.
    * "say" is orchestrator narration shown as assistant text in the chat;
    * "step" is a summarised pipeline step (plan, citation check, verify).
+   * "continue" means this invocation is pausing with real work still left
+   * (see pause() in orchestrator.ts) — the client re-POSTs /run to resume.
    */
-  type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done" | "say" | "step";
+  type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done" | "say" | "step" | "continue";
   payload: Record<string, unknown>;
 };
 
