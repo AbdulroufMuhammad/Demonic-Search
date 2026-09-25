@@ -57,6 +57,10 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   const [events, setEvents] = useState<StoredEvent[]>(initial.events);
   const [messages, setMessages] = useState<StoredMessage[]>(initial.messages);
   const [board, setBoard] = useState(initial.board);
+  // Any template can search now (see lib/orchestrator.ts's merged pipeline),
+  // so the Board tab shouldn't be Research-only — it should show up whenever
+  // there's actually something on it, whichever pill produced it.
+  const hasBoardContent = template.magazineReport || board.facets.length > 0 || board.sources.length > 0;
   const [reportVersion, setReportVersion] = useState(initial.files.find((f) => f.path === "index.html")?.version ?? 0);
   const [reportHtml, setReportHtml] = useState<string | null>(null);
 
@@ -71,7 +75,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   // shown directly in the active Thinking row instead. See ChatPanel.
   const [thinkingText, setThinkingText] = useState("");
 
-  const [tab, setTab] = useState<"report" | "board">(template.research ? "board" : "report");
+  const [tab, setTab] = useState<"report" | "board">(hasBoardContent ? "board" : "report");
   const [inspect, setInspect] = useState(false);
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [drawer, setDrawer] = useState<"inspect" | "source" | null>(null);
@@ -201,7 +205,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
       setRunning(false);
       setThinkingText("");
       resync().then(() => {
-        if (tabRef.current === "report" || template.research === false) fetchReport();
+        if (tabRef.current === "report" || !template.magazineReport) fetchReport();
       });
       return;
     }
@@ -234,7 +238,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
     setElapsed(0);
     setStageCount(0);
     setPhaseNow("Starting…");
-    setTab(template.research ? "board" : "report");
+    setTab(template.magazineReport ? "board" : "report");
     setInspect(false);
     setDrawer(null);
     setSel(null);
@@ -328,7 +332,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   const finalChips =
     project.status === "ready"
       ? [
-          ...(template.research ? [{ l: "Open the board", onClick: () => setTab("board") }] : []),
+          ...(hasBoardContent ? [{ l: "Open the board", onClick: () => setTab("board") }] : []),
           ...(openGap
             ? [{ l: `Research: ${openGap.question}`, onClick: () => chatEdit(`Run another research round on: ${openGap.question}`, null) }]
             : []),
@@ -407,7 +411,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
       <section className="canvas-col">
         <div className="canvas-toolbar">
           <div className="canvas-toolbar-left">
-            {template.research && (
+            {hasBoardContent && (
               <div className="tab-group">
                 <button className={`tab-btn${tab === "report" ? " active" : ""}`} onClick={() => setTab("report")}>
                   Report
@@ -440,7 +444,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
                   <span className="l3" />
                 </div>
                 <p className="writing-caption">
-                  {project.status === "needs_input" ? "Answer in chat to continue." : "The Writer starts once research is verified."}
+                  {project.status === "needs_input" ? "Answer in chat to continue." : "The canvas fills in once the run finishes."}
                 </p>
               </div>
             </div>

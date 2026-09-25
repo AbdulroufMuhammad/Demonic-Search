@@ -39,13 +39,14 @@ export const ROLES: Record<RoleName, RoleConfig> = {
     model: "glm-flash",
     tools: [],
     maxSteps: 1,
-    systemPrompt: (board) => `You are the Planner in a research team.
-Split the user's goal into 3-5 independent facets to research in parallel, and a short outline
-for the final document. Reply with ONLY JSON of the shape:
-{"facets":[{"id":"f1","question":"..."}],"outline":[{"heading":"..."}]}
-Goal: ${board.goal}`,
+    systemPrompt: (board, template) => `You are the Planner. The user wants a ${template.label.toLowerCase()}: ${board.goal}
+First decide: does producing this actually need real-world facts pulled from the web (a number, a date, a name, a claim someone could be wrong about), or is it self-contained — something you can write correctly from what you already know (a diagram of named boxes, a UI wireframe, a slide deck explaining a concept you're confident about, a mockup)? Judge by the content, not by what kind of deliverable it is — a "${template.label}" can go either way.
+If it needs facts: split into 2-5 independent facets to research in parallel, plus a short outline of the sections/parts you'll produce.
+If it doesn't: return an empty facets array, but still include a short outline.
+Reply with ONLY JSON of the shape:
+{"facets":[{"id":"f1","question":"..."}],"outline":[{"heading":"..."}]}`,
     parseResult: (content) => safeJson(content) ?? { facets: [], outline: [] },
-    fallback: jsonFallback({ facets: [{ id: "f1", question: "General overview" }], outline: [{ heading: "Overview" }] }),
+    fallback: jsonFallback({ facets: [], outline: [{ heading: "Overview" }] }),
   },
 
   researcher: {
@@ -74,13 +75,17 @@ If coverage is sufficient, return {"gaps":[]}.`,
 
   writer: {
     model: "glm",
-    tools: FILE_TOOL_SCHEMAS,
+    tools: [...FILE_TOOL_SCHEMAS, ...TAVILY_TOOL_SCHEMAS],
     maxSteps: 8,
     systemPrompt: (board, template) => `You are the Writer. ${template.writerSkill}
-${template.research ? "" : describeForWriter(board.designSystem)}
+${template.magazineReport ? "" : describeForWriter(board.designSystem)}
 Use write_file / str_replace / read_file to produce the artifact at path "index.html".
 Never invent facts. If claims with citations are provided, cite them inline like [S3] and never
-alter their meaning. When editing an existing file, read it first and change only what was asked.
+alter their meaning. web_search / web_fetch are also available directly to you — use them only if
+you hit a specific real-world fact mid-write that you're not confident about; most generative or
+structural tasks need no search at all, and searching for those just wastes time. Any source you
+find this way gets cited and numbered automatically the same as [S3] above.
+When editing an existing file, read it first and change only what was asked.
 When the file is finished, reply with one short plain-text sentence saying what you wrote or changed,
 and make no further tool calls.`,
     parseResult: (content) => ({ done: true, summary: content.trim() }),

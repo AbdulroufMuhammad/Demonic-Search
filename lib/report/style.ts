@@ -7,6 +7,24 @@
 export const REPORT_FONTS_HREF =
   "https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;1,8..60,400&display=swap";
 
+/**
+ * Minimal, self-contained citation styling for every non-magazineReport
+ * template (see lib/report/finalize.ts's finalizeLight). Unlike REPORT_CSS
+ * below, this can't assume --paper/--ink/--accent exist — those templates'
+ * Writers hand-style their own page — so it uses fixed neutral tones instead
+ * of the theme variables, and only appears at all when something was
+ * actually cited.
+ */
+export const CITE_CSS = `
+sup.cite{font-family:ui-monospace,monospace;font-size:10px;font-weight:600;font-style:normal;background:#e8e8e8;color:#111;padding:1px 5px;border-radius:4px;margin-left:2px;line-height:1}
+.r-sources{margin-top:40px;padding-top:16px;border-top:1px solid #ddd;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;color:#444}
+.r-sources .label{display:block;margin-bottom:8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888}
+.r-sources ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.r-sources li{display:flex;gap:8px}
+.r-sources .n{color:#888;font-family:ui-monospace,monospace}
+.r-sources .url{color:#888;word-break:break-all}
+`;
+
 export const REPORT_CSS = `
 :root{--paper:#f6f4ee;--ink:#1b1b18;--accent:#c8f542;
 --font-text:'Source Serif 4',Georgia,serif;--font-heading:var(--font-text);--font-ui:Geist,ui-sans-serif,system-ui,sans-serif;--font-mono:'Geist Mono',ui-monospace,monospace}

@@ -163,12 +163,19 @@ async function verify(db: SupabaseClient, board: Board, template: ReturnType<typ
 }
 
 /**
- * The collaboration algorithm (guide §5): Plan → fan out Researchers →
+ * The pipeline for every template (guide §5, generalized): Plan → fan out
+ * Researchers only if the Planner decided this needs real-world facts →
  * Critique → loop on high-priority gaps → Write → Verify. Deterministic
  * control flow around nondeterministic agent calls; termination lives here,
  * not in a prompt. The "say" events narrate the run from real board state.
+ *
+ * There is no per-template branch here on purpose: web_search/web_fetch are
+ * available throughout, and whether this run does any research at all comes
+ * down to how many facets the Planner returns (see roles.ts) — zero for a
+ * self-contained diagram/wireframe/slide request, some for anything that
+ * depends on facts, regardless of which of the six pills was picked.
  */
-export async function runResearch(
+export async function runPipeline(
   db: SupabaseClient,
   projectId: string,
   onEvent?: (e: AgentEvent) => void,
@@ -179,11 +186,12 @@ export async function runResearch(
   const emit = makeEmitter(db, projectId, onEvent);
   const hasBudget = () => deadline - Date.now() > PHASE_MARGIN_MS;
 
-  // A plan already on the board means an earlier invocation got at least
-  // that far before pausing — reuse it rather than re-planning (which would
-  // burn a call and could hand back a different outline than the claims
-  // already gathered were researched against).
-  const resuming = !!board.plan?.facets?.length;
+  // A plan already on the board (even one with zero facets — a earlier
+  // invocation decided this needed no research) means an earlier invocation
+  // got at least that far before pausing — reuse it rather than re-planning
+  // (which would burn a call and could hand back a different outline than
+  // the claims already gathered were researched against).
+  const resuming = board.plan != null;
 
   if (!hasBudget()) {
     await pause(db, projectId, emit, "Picking this up now — I'll get started in a moment.");
@@ -196,21 +204,25 @@ export async function runResearch(
   }
   const facets = (board.plan?.facets ?? []).slice(0, MAX_FACETS);
   if (!resuming) {
-    await say(
-      emit,
-      `I'll split this into ${plural(facets.length, "question")} and research them in parallel. A claim only makes it into the report if I can find its quote in the source page.`
-    );
-    await emit({
-      role: "planner",
-      type: "step",
-      payload: {
-        kind: "plan",
-        detail: `${plural(facets.length, "research question")}`,
-        rows: facets.map((f, i) => ({ k: `Q${i + 1}`, t: f.question, d: "" })),
-      },
-    });
+    if (facets.length) {
+      await say(
+        emit,
+        `I'll split this into ${plural(facets.length, "question")} and research them in parallel. A claim only makes it in if I can find its quote in the source page.`
+      );
+      await emit({
+        role: "planner",
+        type: "step",
+        payload: {
+          kind: "plan",
+          detail: `${plural(facets.length, "research question")}`,
+          rows: facets.map((f, i) => ({ k: `Q${i + 1}`, t: f.question, d: "" })),
+        },
+      });
+    } else {
+      await say(emit, `This doesn't need outside research — writing the ${template.label.toLowerCase()} now.`);
+    }
   } else {
-    await say(emit, "Continuing the research from where I left off.");
+    await say(emit, "Continuing from where I left off.");
   }
 
   // Resuming with claims already on the board: only chase the gaps that
@@ -312,15 +324,19 @@ export async function runResearch(
   }
 
   if (!hasBudget()) {
-    await pause(db, projectId, emit, "Research is done — I'll write the report in a moment.");
+    await pause(db, projectId, emit, `I'll write the ${template.label.toLowerCase()} in a moment.`);
     return board;
   }
   const writerInput = `Goal: ${board.goal}\nOutline: ${JSON.stringify(
     board.plan?.outline
-  )}\nVerified claims (cite by sourceId): ${JSON.stringify(board.claims)}\nSources: ${JSON.stringify(
-    Object.fromEntries([...board.sources].map(([id, s]) => [id, { title: s.title, url: s.url }]))
-  )}\nOpen gaps: ${JSON.stringify(board.gaps.map((g) => g.question))}${await queuedInstructions(db, projectId)}`;
-  await runAgent(db, "writer", board, template, writerInput, emit, { deadline });
+  )}${
+    board.claims.length
+      ? `\nVerified claims (cite by sourceId): ${JSON.stringify(board.claims)}\nSources: ${JSON.stringify(
+          Object.fromEntries([...board.sources].map(([id, s]) => [id, { title: s.title, url: s.url }]))
+        )}\nOpen gaps: ${JSON.stringify(board.gaps.map((g) => g.question))}`
+      : ""
+  }${await queuedInstructions(db, projectId)}`;
+  const w = await runAgent(db, "writer", board, template, writerInput, emit, { deadline });
 
   if (!hasBudget()) {
     await pause(db, projectId, emit, "The draft is on the canvas — I'll finish checking it in a moment.");
@@ -335,62 +351,18 @@ export async function runResearch(
     projectId,
     emit,
     ok
-      ? `The report is on the canvas. ${plural(board.claims.length, "claim is", "claims are")} verified against their sources.${
-          board.dropped.length
-            ? ` I left out ${plural(board.dropped.length, "claim")} because the quote wasn't in the page.`
-            : ""
-        }${open ? ` Still unanswered: ${open}` : ""}`
-      : "The report couldn't be finished. The research itself is saved — open the board to see what was found, and try again."
-  );
-  return board;
-}
-
-/** Non-research templates skip the search/critique loop: Writer, then Verifier once. */
-export async function runDirect(
-  db: SupabaseClient,
-  projectId: string,
-  onEvent?: (e: AgentEvent) => void,
-  deadline: number = Date.now() + PIPELINE_DEADLINE_MS
-) {
-  const board = await Board.load(db, projectId);
-  const template = getTemplate(board.template);
-  const emit = makeEmitter(db, projectId, onEvent);
-  const hasBudget = () => deadline - Date.now() > PHASE_MARGIN_MS;
-
-  // An artifact already on the board means an earlier invocation got the
-  // Writer through before pausing — go straight to verifying it rather than
-  // asking the Writer to redo the whole thing.
-  const resuming = await hasArtifact(db, projectId);
-
-  if (!hasBudget()) {
-    await pause(db, projectId, emit, "Picking this up now — I'll get started in a moment.");
-    return board;
-  }
-
-  let w: any = null;
-  if (!resuming) {
-    await say(emit, `Writing a ${template.label.toLowerCase()} for this. I'll check the page renders before handing it over.`);
-    w = await runAgent(db, "writer", board, template, board.goal + (await queuedInstructions(db, projectId)), emit, { deadline });
-  } else {
-    await say(emit, "Continuing — double-checking the page now.");
-  }
-
-  if (!hasBudget()) {
-    await pause(db, projectId, emit, "The draft is on the canvas — I'll finish checking it in a moment.");
-    return board;
-  }
-  await verify(db, board, template, emit, deadline);
-
-  const ok = await hasArtifact(db, projectId);
-  await finish(
-    db,
-    projectId,
-    emit,
-    ok
-      ? w?.summary
-        ? `${w.summary} It's on the canvas.`
-        : "It's on the canvas."
-      : "This couldn't be finished. Try again, or simplify the request."
+      ? board.claims.length
+        ? `The ${template.label.toLowerCase()} is on the canvas. ${plural(board.claims.length, "claim is", "claims are")} verified against their sources.${
+            board.dropped.length
+              ? ` I left out ${plural(board.dropped.length, "claim")} because the quote wasn't in the page.`
+              : ""
+          }${open ? ` Still unanswered: ${open}` : ""}`
+        : w?.summary
+          ? `${w.summary} It's on the canvas.`
+          : "It's on the canvas."
+      : board.claims.length
+        ? "This couldn't be finished. The research itself is saved — open the board to see what was found, and try again."
+        : "This couldn't be finished. Try again, or simplify the request."
   );
   return board;
 }
@@ -443,9 +415,7 @@ export async function runProject(
   }
 
   try {
-    return template.research
-      ? await runResearch(db, projectId, onEvent, deadline)
-      : await runDirect(db, projectId, onEvent, deadline);
+    return await runPipeline(db, projectId, onEvent, deadline);
   } catch (e) {
     await db.from("projects").update({ status: "error" }).eq("id", projectId);
     throw e;
@@ -470,7 +440,7 @@ export async function runEdit(
   const input = `The user asked for a change to index.html: ${JSON.stringify(message)}${
     target ? `\nIt concerns the element with data-el="${target.id}" (${target.tag}). Change only that element unless asked otherwise.` : ""
   }${
-    template.research
+    board.claims.length
       ? `\nVerified claims (cite by sourceId): ${JSON.stringify(board.claims)}\nKeep every citation attached to its claim.`
       : ""
   }`;

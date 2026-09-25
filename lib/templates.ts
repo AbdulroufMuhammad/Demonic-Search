@@ -11,7 +11,18 @@ export type Template = {
   id: TemplateId;
   label: string;
   icon: string;
-  research: boolean;
+  /**
+   * Every template runs the same Plan -> research-if-needed -> Write ->
+   * Verify pipeline and has web_search/web_fetch available throughout — the
+   * model decides per-request whether a task needs real-world facts, not
+   * this field. This only controls the house-styled, citation-scaffolded
+   * "report" layout (numbered citations, margin notes, sources footer,
+   * takeaways grid) that only the research writerSkill's output matches —
+   * every other template still gets simple numbered citations + a sources
+   * footer appended automatically if it ends up citing anything, just not
+   * that specific magazine layout.
+   */
+  magazineReport: boolean;
   writerSkill: string;
   defaultExport: "pdf" | "pptx" | "html";
 };
@@ -56,12 +67,12 @@ Figure — only when an inline SVG diagram (architecture, flow, a simple bar/lin
 Keep the SVG simple — boxes, arrows, bars — and only plot numbers that came from a verified claim.`;
 
 export const TEMPLATES: Template[] = [
-  { id: "research", label: "Research", icon: "⌕", research: true, defaultExport: "pdf", writerSkill: RESEARCH_SKILL },
-  { id: "document", label: "Document", icon: "▦", research: false, defaultExport: "pdf", writerSkill: "Write one flowing HTML document body. Use a <style> block with an @page rule for size/margins and running headers. Keep it printable." },
-  { id: "slides", label: "Slides", icon: "≡", research: false, defaultExport: "pptx", writerSkill: "Write a fixed 1920x1080 <section class=\"slide\"> per slide inside one HTML file. Put speaker notes in a data-notes attribute on each section." },
-  { id: "diagram", label: "Diagram", icon: "◫", research: false, defaultExport: "html", writerSkill: "Produce a single HTML file with an inline SVG diagram. Prefer CSS grid for architecture boxes, SVG for flows and connectors." },
-  { id: "wireframe", label: "Wireframe", icon: "▶", research: false, defaultExport: "html", writerSkill: "Produce a low-fidelity HTML/CSS wireframe: boxes, labels, no real content." },
-  { id: "blank", label: "Blank", icon: "▯", research: false, defaultExport: "html", writerSkill: "Produce a single self-contained HTML file for whatever the user asked for." },
+  { id: "research", label: "Research", icon: "⌕", magazineReport: true, defaultExport: "pdf", writerSkill: RESEARCH_SKILL },
+  { id: "document", label: "Document", icon: "▦", magazineReport: false, defaultExport: "pdf", writerSkill: "Write one flowing HTML document body. Use a <style> block with an @page rule for size/margins and running headers. Keep it printable." },
+  { id: "slides", label: "Slides", icon: "≡", magazineReport: false, defaultExport: "pptx", writerSkill: "Write a fixed 1920x1080 <section class=\"slide\"> per slide inside one HTML file. Put speaker notes in a data-notes attribute on each section." },
+  { id: "diagram", label: "Diagram", icon: "◫", magazineReport: false, defaultExport: "html", writerSkill: "Produce a single HTML file with an inline SVG diagram. Prefer CSS grid for architecture boxes, SVG for flows and connectors." },
+  { id: "wireframe", label: "Wireframe", icon: "▶", magazineReport: false, defaultExport: "html", writerSkill: "Produce a low-fidelity HTML/CSS wireframe: boxes, labels, no real content." },
+  { id: "blank", label: "Blank", icon: "▯", magazineReport: false, defaultExport: "html", writerSkill: "Produce a single self-contained HTML file for whatever the user asked for." },
 ] as unknown as Template[];
 
 export function getTemplate(id: string): Template {

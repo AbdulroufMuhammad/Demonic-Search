@@ -50,7 +50,7 @@ export default function Composer({
       <div className="composer-box">
         <textarea
           className="composer-textarea"
-          placeholder="Describe the report, deck or diagram you need. Research mode searches the web and cites every claim."
+          placeholder="Describe the report, deck or diagram you need. It searches the web and cites sources whenever the request needs real facts."
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {

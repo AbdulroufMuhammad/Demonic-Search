@@ -1,10 +1,11 @@
 import { parse, HTMLElement } from "node-html-parser";
 import type { Claim } from "@/lib/board";
 import { reportVars, googleFontsHref, type DesignSystem } from "@/lib/designSystems";
-import { REPORT_CSS, REPORT_FONTS_HREF } from "@/lib/report/style";
+import { REPORT_CSS, REPORT_FONTS_HREF, CITE_CSS } from "@/lib/report/style";
 
 export type ArtifactContext = {
-  research: boolean;
+  /** See the note on Template.magazineReport in lib/templates.ts. */
+  magazineReport: boolean;
   sources: Map<string, { url: string; title?: string }>;
   claims: Claim[];
   dropped: Claim[];
@@ -79,6 +80,26 @@ function styleBlock(ds: DesignSystem | null) {
   return `<style id="ds-house">${REPORT_CSS}${vars ? `:root{${vars}}` : ""}</style>`;
 }
 
+/**
+ * Citation numbers follow first appearance; unknown source IDs (the Writer
+ * citing something not in ctx.sources) are stripped rather than left broken.
+ * Shared by both the magazine layout and the light path below, since any
+ * template's Writer can now produce [S#] citations.
+ */
+function numberCitations(scope: HTMLElement, ctx: ArtifactContext) {
+  const order: string[] = [];
+  for (const sup of scope.querySelectorAll("sup.cite")) {
+    const id = sup.getAttribute("data-src") ?? "";
+    if (!ctx.sources.has(id)) {
+      sup.remove();
+      continue;
+    }
+    if (!order.includes(id)) order.push(id);
+    sup.set_content(String(order.indexOf(id) + 1));
+  }
+  return order;
+}
+
 function finalizeResearch(root: HTMLElement, ctx: ArtifactContext) {
   const body = root.querySelector("body")!;
   let article = body.querySelector("article.report") ?? body.querySelector("article");
@@ -91,17 +112,7 @@ function finalizeResearch(root: HTMLElement, ctx: ArtifactContext) {
   // Writer-authored CSS would fight the house stylesheet.
   root.querySelectorAll("style").forEach((s) => s.getAttribute("id") !== "ds-house" && s.remove());
 
-  // Citation numbers follow first appearance; unknown source IDs are removed.
-  const order: string[] = [];
-  for (const sup of article.querySelectorAll("sup.cite")) {
-    const id = sup.getAttribute("data-src") ?? "";
-    if (!ctx.sources.has(id)) {
-      sup.remove();
-      continue;
-    }
-    if (!order.includes(id)) order.push(id);
-    sup.set_content(String(order.indexOf(id) + 1));
-  }
+  const order = numberCitations(article, ctx);
   const num = (id: string) => order.indexOf(id) + 1;
   const quoteFor = (id: string) => ctx.claims.find((c) => c.sourceIds.includes(id))?.quote;
 
@@ -209,23 +220,51 @@ function finalizeResearch(root: HTMLElement, ctx: ArtifactContext) {
 }
 
 /**
- * Runs on every write to an HTML artifact. For Research reports it builds the
- * scaffolding the design relies on (numbered citations, margin notes, sources
- * list, stats) from the board, so the Writer only writes prose. For every
- * template it tags text elements with data-el ids for the Inspector.
+ * Every non-magazineReport template's path: the Writer keeps full control of
+ * its own markup and <style> (a slide deck, a wireframe, a diagram — none of
+ * these fit the report layout), but if it cited anything, those citations
+ * still get numbered and a small sources footer gets appended so a claim
+ * pulled from a search is never left unattributed just because the format
+ * isn't "Research".
+ */
+function finalizeLight(root: HTMLElement, ctx: ArtifactContext) {
+  const body = root.querySelector("body")!;
+  const order = numberCitations(body, ctx);
+  if (order.length) {
+    const list = order
+      .map((id) => {
+        const s = ctx.sources.get(id)!;
+        return `<li data-src="${id}"><span class="n">${order.indexOf(id) + 1}</span><span>${esc(s.title ?? host(s.url))} <span class="url">${esc(s.url)}</span></span></li>`;
+      })
+      .join("");
+    body.insertAdjacentHTML("beforeend", `<footer class="r-sources"><span class="label">Sources</span><ol>${list}</ol></footer>`);
+    const head = root.querySelector("head")!;
+    if (!head.querySelector("#cite-house")) head.insertAdjacentHTML("beforeend", `<style id="cite-house">${CITE_CSS}</style>`);
+  }
+  assignIds(body, (el) => {
+    if (el.closest(".r-sources")) return null;
+    return el.classList.contains("dek") || el.classList.contains("open-question") ? "e" : el.tagName === "H1" ? "title" : "e";
+  });
+}
+
+/**
+ * Runs on every write to an HTML artifact, for every template — any of them
+ * can now search and cite. magazineReport templates get the full report
+ * scaffolding (numbered citations, margin notes, sources list, stats) built
+ * from the board, so the Writer only writes prose; every other template
+ * keeps its own markup but still gets citations numbered and a sources
+ * footer appended if it cited anything. Every template gets data-el ids for
+ * the Inspector.
  */
 export function finalizeArtifact(html: string, ctx: ArtifactContext): string {
-  const root = ensureDocument(ctx.research ? citeMarkup(html) : html);
+  const root = ensureDocument(citeMarkup(html));
   const head = root.querySelector("head")!;
   if (!head.querySelector("meta[charset]")) head.insertAdjacentHTML("afterbegin", `<meta charset="utf-8">`);
   if (!head.querySelector("meta[name=viewport]"))
     head.insertAdjacentHTML("beforeend", `<meta name="viewport" content="width=device-width, initial-scale=1">`);
 
-  if (ctx.research) finalizeResearch(root, ctx);
-  else
-    assignIds(root.querySelector("body")!, (el) =>
-      el.classList.contains("dek") || el.classList.contains("open-question") ? "e" : el.tagName === "H1" ? "title" : "e"
-    );
+  if (ctx.magazineReport) finalizeResearch(root, ctx);
+  else finalizeLight(root, ctx);
 
   const out = root.toString();
   return /^\s*<!doctype/i.test(out) ? out : `<!doctype html>\n${out}`;

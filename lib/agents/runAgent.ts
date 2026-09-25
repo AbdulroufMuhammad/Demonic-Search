@@ -35,7 +35,7 @@ const DEFAULT_CALL_BUDGET_MS = 90_000;
 export function artifactTransform(board: Board, template: Template) {
   return (_path: string, content: string) =>
     finalizeArtifact(content, {
-      research: template.research,
+      magazineReport: template.magazineReport,
       sources: board.sources,
       claims: board.claims,
       dropped: board.dropped,
