@@ -185,10 +185,14 @@ function finalizeResearch(root: HTMLElement, ctx: ArtifactContext) {
     if (el.closest(".r-meta, .r-stats, .r-notes, .r-sources")) return null;
     if (el.classList.contains("open-question")) return "oq";
     if (el.closest(".open-question") || el.closest("blockquote") && el.tagName !== "BLOCKQUOTE") return null;
+    // A <li> in .milestones wraps its own h4/p children, which are targets in
+    // their own right — tagging the <li> too would let an edit to it wipe out
+    // that nested structure (see the same non-issue for plain-text list items).
+    if (el.tagName === "LI" && el.closest(".milestones")) return null;
     if (el.tagName === "H1") return "title";
     if (el.classList.contains("dek")) return "dek";
     if (el.tagName === "LI" && el.closest(".takeaways")) return "t";
-    if (el.tagName === "H2" || el.tagName === "H3") return "h";
+    if (el.tagName === "H2" || el.tagName === "H3" || el.tagName === "H4") return "h";
     if (el.tagName === "BLOCKQUOTE") return "pq";
     return "p";
   });
