@@ -203,9 +203,13 @@ async function chatOnce(
 
 /**
  * Chat with automatic one-shot fallback to the model registry's backup
- * model — on a server error, and (the common real-world case) on a
- * provider that's just slow to respond. `deadline` is an absolute epoch ms
- * shared by both attempts, so a hung primary call can't starve the
+ * model — on a server error, on a provider that's just slow to respond, and
+ * on that provider rejecting the request outright (401/403: an expired,
+ * revoked, or misconfigured key for that one provider). The two providers
+ * hold separate credentials, so one being bad is exactly the case a
+ * same-request fallback can route around instead of failing every call
+ * until someone notices and fixes the key. `deadline` is an absolute epoch
+ * ms shared by both attempts, so a hung primary call can't starve the
  * fallback of its own shot within the caller's overall time budget.
  */
 export async function chat(
@@ -221,8 +225,8 @@ export async function chat(
     return await chatOnce(modelKey, opts);
   } catch (e) {
     const timedOut = (e as any)?.name === "TimeoutError";
-    const serverError = e instanceof GatewayError && (e.status === 429 || e.status >= 500);
-    if ((timedOut || serverError) && opts.deadline - Date.now() > 1000) {
+    const providerFailure = e instanceof GatewayError && (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500);
+    if ((timedOut || providerFailure) && opts.deadline - Date.now() > 1000) {
       const fb = FALLBACKS[modelKey];
       if (fb !== modelKey) return chatOnce(fb, opts);
     }
