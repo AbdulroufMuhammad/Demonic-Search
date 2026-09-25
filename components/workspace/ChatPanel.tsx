@@ -13,6 +13,7 @@ export default function ChatPanel({
   runPct,
   runTime,
   items,
+  thinkingText,
   expanded,
   onToggle,
   finalChips,
@@ -36,6 +37,7 @@ export default function ChatPanel({
   runPct?: number;
   runTime?: string;
   items: ThreadItem[];
+  thinkingText?: string;
   expanded: Record<string, boolean>;
   onToggle: (key: string) => void;
   finalChips?: { l: string; onClick: () => void }[];
@@ -111,11 +113,14 @@ export default function ChatPanel({
           }
           const open = expanded[it.key] ?? false;
           const showBody = open && it.rows.length > 0 && !it.active;
+          const isThinking = it.verb === "Thinking" && it.active;
           return (
             <div key={it.key} className="tool-row">
               <button className="tool-row-head" onClick={() => onToggle(it.key)}>
                 <span className={`tool-verb${it.active ? " active" : ""}`}>{it.verb}</span>
-                <span className={`tool-detail${it.active ? " active" : ""}`}>{it.detail}</span>
+                <span className={`tool-detail${it.active ? " active" : ""}`}>
+                  {isThinking && thinkingText ? thinkingText : it.detail}
+                </span>
                 <span className="tool-meta">{it.meta}</span>
                 {!!it.rows.length && !it.active && <span className="tool-chev">{open ? "▾" : "▸"}</span>}
               </button>

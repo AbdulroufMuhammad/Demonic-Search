@@ -9,13 +9,27 @@ import type { Emit } from "@/lib/events";
 import { finalizeArtifact } from "@/lib/report/finalize";
 
 type Tool = (args: any, board: Board) => Promise<unknown>;
-export type AgentContext = { facetId?: string };
+/**
+ * `deadline` is the pipeline-wide wall-clock budget (epoch ms; see
+ * lib/orchestrator.ts). A single stalled call is bounded by MODEL_TIMEOUT_MS
+ * below, but several roles retrying in sequence (each individually within
+ * that cap) can still add up past the route's own 300s function limit —
+ * observed live: checkClarify + a timed-out Planner + a timed-out Researcher
+ * + Critic + a timed-out Writer + Verifier + a Writer retry cost over five
+ * minutes of real wall time in one run, and the platform killed the function
+ * mid-retry with nothing ever marking the project as failed. Every call here
+ * shrinks its own timeout to whatever's left of that shared budget, and
+ * skips the call entirely once there's essentially nothing left, instead of
+ * finding out the hard way.
+ */
+export type AgentContext = { facetId?: string; deadline?: number };
 
 // A hard cap per model call, well above the ~20-40s a reasoning-model call
 // has been observed to take (see the note on ROLES in lib/agents/roles.ts).
 // Without this, a stalled provider call hangs silently forever — no error,
 // no event, nothing for the user to see — instead of failing visibly.
 const MODEL_TIMEOUT_MS = 60_000;
+const MIN_CALL_MS = 3_000;
 
 export function artifactTransform(board: Board, template: Template) {
   return (_path: string, content: string) =>
@@ -84,13 +98,24 @@ export async function runAgent(
   for (let step = 0; step < cfg.maxSteps; step++) {
     board.guardTokens();
 
+    const remaining = ctx.deadline != null ? ctx.deadline - Date.now() : Infinity;
+    if (remaining < MIN_CALL_MS) {
+      // Not enough of the pipeline's wall-clock budget left to make this
+      // call worth attempting — the platform would likely kill the whole
+      // function mid-call anyway. Stop here rather than find out the hard
+      // way (see the AgentContext note above).
+      await emit({ role, type: "phase", payload: { status: "budget-exhausted", facetId: ctx.facetId } });
+      return cfg.fallback(board);
+    }
+    const callTimeout = Math.min(MODEL_TIMEOUT_MS, remaining);
+
     let r;
     try {
       r = await chat(cfg.model, {
         messages,
         tools: cfg.tools.length ? cfg.tools : undefined,
-        onToken: (t) => emit({ role, type: "token", payload: { t } }),
-        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+        onToken: (t) => emit({ role, type: "token", payload: { t, facetId: ctx.facetId } }),
+        signal: AbortSignal.timeout(callTimeout),
       });
     } catch (e) {
       // A stalled/unresponsive provider call — stop this agent here and

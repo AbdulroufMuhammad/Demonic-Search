@@ -16,8 +16,39 @@ const MAX_ROUNDS = 1;
 const MAX_FACETS = 3;
 const CONCURRENCY = 3;
 
+// The pipeline-wide wall-clock budget (see the note on AgentContext in
+// lib/agents/runAgent.ts): comfortably under the route's 300s limit, leaving
+// margin for DB writes and SSE flush after the last call returns.
+const PIPELINE_DEADLINE_MS = 220_000;
+
 const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const say = (emit: Emit, text: string) => emit({ role: "orchestrator", type: "say", payload: { text } });
+
+/** Has the Writer actually produced index.html at any point in this run? Decides ready vs. error below. */
+async function hasArtifact(db: SupabaseClient, projectId: string) {
+  const { count } = await db
+    .from("files")
+    .select("id", { count: "exact", head: true })
+    .eq("project_id", projectId)
+    .eq("path", "index.html");
+  return !!count;
+}
+
+/**
+ * The run's terminal status. An artifact existing is the bar for "ready" —
+ * not just that every role finished — so a run that timed out with nothing
+ * ever written lands on a visible, explicit "error" instead of a "Ready"
+ * that opens onto an empty canvas.
+ */
+async function finish(db: SupabaseClient, projectId: string, emit: Emit, message: string) {
+  const ok = await hasArtifact(db, projectId);
+  await say(emit, message);
+  await emit({ type: "done", payload: {} });
+  await db
+    .from("projects")
+    .update({ status: ok ? "ready" : "error", updated_at: new Date().toISOString() })
+    .eq("id", projectId);
+}
 
 function safeJson(content: string): any {
   const match = content.match(/\{[\s\S]*\}/);
@@ -53,6 +84,7 @@ async function checkClarify(db: SupabaseClient, projectId: string, goal: string,
         },
         { role: "user", content: goal },
       ],
+      onToken: (t) => emit({ role: "planner", type: "token", payload: { t } }),
       signal: AbortSignal.timeout(25_000),
     });
     parsed = safeJson(r.content);
@@ -82,8 +114,8 @@ async function queuedInstructions(db: SupabaseClient, projectId: string) {
   return extra.length ? `\nExtra instructions from the user: ${JSON.stringify(extra)}` : "";
 }
 
-async function verify(db: SupabaseClient, board: Board, template: ReturnType<typeof getTemplate>, emit: Emit) {
-  const report = await runAgent(db, "verifier", board, template, "Verify index.html.", emit);
+async function verify(db: SupabaseClient, board: Board, template: ReturnType<typeof getTemplate>, emit: Emit, deadline: number) {
+  const report = await runAgent(db, "verifier", board, template, "Verify index.html.", emit, { deadline });
   const issues: string[] = report?.issues ?? [];
   await emit({
     role: "verifier",
@@ -94,8 +126,11 @@ async function verify(db: SupabaseClient, board: Board, template: ReturnType<typ
       rows: issues.map((t) => ({ k: "!", t, d: "" })),
     },
   });
-  if (issues.length) {
-    await runAgent(db, "writer", board, template, `Fix these issues in index.html: ${JSON.stringify(issues)}`, emit);
+  // Retrying the Writer only makes sense with real time left for it to run —
+  // otherwise this is just another call guaranteed to hit runAgent's own
+  // budget-exhausted skip, for no benefit over stopping here.
+  if (issues.length && deadline - Date.now() > 10_000) {
+    await runAgent(db, "writer", board, template, `Fix these issues in index.html: ${JSON.stringify(issues)}`, emit, { deadline });
   }
 }
 
@@ -108,13 +143,14 @@ async function verify(db: SupabaseClient, board: Board, template: ReturnType<typ
 export async function runResearch(
   db: SupabaseClient,
   projectId: string,
-  onEvent?: (e: AgentEvent) => void
+  onEvent?: (e: AgentEvent) => void,
+  deadline: number = Date.now() + PIPELINE_DEADLINE_MS
 ) {
   const board = await Board.load(db, projectId);
   const template = getTemplate(board.template);
   const emit = makeEmitter(db, projectId, onEvent);
 
-  board.plan = await runAgent(db, "planner", board, template, board.goal, emit);
+  board.plan = await runAgent(db, "planner", board, template, board.goal, emit, { deadline });
   await board.checkpoint();
   const facets = (board.plan?.facets ?? []).slice(0, MAX_FACETS);
   await say(
@@ -135,10 +171,10 @@ export async function runResearch(
   const limit = pLimit(CONCURRENCY);
 
   for (let round = 0; round < MAX_ROUNDS && queue.length; round++) {
-    // Soft check, not board.guard(): running out of search budget mid-run
-    // should stop starting new rounds, not abort the whole run before the
-    // Writer ever sees the claims already gathered.
-    if (board.budget.searchesLeft <= 0) break;
+    // Soft check, not board.guard(): running out of search budget (or wall-
+    // clock budget) mid-run should stop starting new rounds, not abort the
+    // whole run before the Writer ever sees the claims already gathered.
+    if (board.budget.searchesLeft <= 0 || deadline - Date.now() < 15_000) break;
     await emit({
       role: "orchestrator",
       type: "phase",
@@ -150,6 +186,7 @@ export async function runResearch(
         limit(() =>
           runAgent(db, "researcher", board, template, `Facet: ${q.facetId}\nQuestion: ${q.question}`, emit, {
             facetId: q.facetId,
+            deadline,
           })
         )
       )
@@ -184,7 +221,8 @@ export async function runResearch(
       `Goal: ${board.goal}\nOutline: ${JSON.stringify(board.plan?.outline)}\nClaims so far: ${JSON.stringify(
         board.claims.map((c) => c.text)
       )}`,
-      emit
+      emit,
+      { deadline }
     );
     board.gaps = critique?.gaps ?? [];
     await board.persistGaps();
@@ -219,20 +257,23 @@ export async function runResearch(
   )}\nVerified claims (cite by sourceId): ${JSON.stringify(board.claims)}\nSources: ${JSON.stringify(
     Object.fromEntries([...board.sources].map(([id, s]) => [id, { title: s.title, url: s.url }]))
   )}\nOpen gaps: ${JSON.stringify(board.gaps.map((g) => g.question))}${await queuedInstructions(db, projectId)}`;
-  await runAgent(db, "writer", board, template, writerInput, emit);
-  await verify(db, board, template, emit);
+  await runAgent(db, "writer", board, template, writerInput, emit, { deadline });
+  await verify(db, board, template, emit, deadline);
 
   const open = board.gaps[0]?.question;
-  await say(
+  const ok = await hasArtifact(db, projectId);
+  await finish(
+    db,
+    projectId,
     emit,
-    `The report is on the canvas. ${plural(board.claims.length, "claim is", "claims are")} verified against their sources.${
-      board.dropped.length
-        ? ` I left out ${plural(board.dropped.length, "claim")} because the quote wasn't in the page.`
-        : ""
-    }${open ? ` Still unanswered: ${open}` : ""}`
+    ok
+      ? `The report is on the canvas. ${plural(board.claims.length, "claim is", "claims are")} verified against their sources.${
+          board.dropped.length
+            ? ` I left out ${plural(board.dropped.length, "claim")} because the quote wasn't in the page.`
+            : ""
+        }${open ? ` Still unanswered: ${open}` : ""}`
+      : "The models were too slow to finish writing the report in time. The research itself is saved — open the board to see what was found, and try again."
   );
-  await emit({ type: "done", payload: {} });
-  await db.from("projects").update({ status: "ready", updated_at: new Date().toISOString() }).eq("id", projectId);
   return board;
 }
 
@@ -240,19 +281,28 @@ export async function runResearch(
 export async function runDirect(
   db: SupabaseClient,
   projectId: string,
-  onEvent?: (e: AgentEvent) => void
+  onEvent?: (e: AgentEvent) => void,
+  deadline: number = Date.now() + PIPELINE_DEADLINE_MS
 ) {
   const board = await Board.load(db, projectId);
   const template = getTemplate(board.template);
   const emit = makeEmitter(db, projectId, onEvent);
 
   await say(emit, `Writing a ${template.label.toLowerCase()} for this. I'll check the page renders before handing it over.`);
-  const w = await runAgent(db, "writer", board, template, board.goal + (await queuedInstructions(db, projectId)), emit);
-  await verify(db, board, template, emit);
-  await say(emit, w?.summary ? `${w.summary} It's on the canvas.` : "It's on the canvas.");
+  const w = await runAgent(db, "writer", board, template, board.goal + (await queuedInstructions(db, projectId)), emit, { deadline });
+  await verify(db, board, template, emit, deadline);
 
-  await emit({ type: "done", payload: {} });
-  await db.from("projects").update({ status: "ready", updated_at: new Date().toISOString() }).eq("id", projectId);
+  const ok = await hasArtifact(db, projectId);
+  await finish(
+    db,
+    projectId,
+    emit,
+    ok
+      ? w?.summary
+        ? `${w.summary} It's on the canvas.`
+        : "It's on the canvas."
+      : "The models were too slow to finish this in time. Try again, or simplify the request."
+  );
   return board;
 }
 
@@ -268,6 +318,7 @@ export async function runProject(db: SupabaseClient, projectId: string, onEvent?
   // zero DB write for the user to see, indistinguishable from "did my click
   // even register?". Now there's always an immediate, visible state change.
   await db.from("projects").update({ status: "running", updated_at: new Date().toISOString() }).eq("id", projectId);
+  const deadline = Date.now() + PIPELINE_DEADLINE_MS;
 
   if (!wasNeedsInput) {
     const emit = makeEmitter(db, projectId, onEvent);
@@ -294,8 +345,8 @@ export async function runProject(db: SupabaseClient, projectId: string, onEvent?
 
   try {
     return template.research
-      ? await runResearch(db, projectId, onEvent)
-      : await runDirect(db, projectId, onEvent);
+      ? await runResearch(db, projectId, onEvent, deadline)
+      : await runDirect(db, projectId, onEvent, deadline);
   } catch (e) {
     await db.from("projects").update({ status: "error" }).eq("id", projectId);
     throw e;

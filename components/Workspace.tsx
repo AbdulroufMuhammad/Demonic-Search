@@ -65,6 +65,11 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   const [stageCount, setStageCount] = useState(0);
   const [runStart, setRunStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  // The live token stream for whichever role is currently "thinking" — kept
+  // out of `events`/buildThread entirely (hundreds of tokens per call would
+  // otherwise bloat that array and re-run buildThread on every one) and
+  // shown directly in the active Thinking row instead. See ChatPanel.
+  const [thinkingText, setThinkingText] = useState("");
 
   const [tab, setTab] = useState<"report" | "board">(template.research ? "board" : "report");
   const [inspect, setInspect] = useState(false);
@@ -151,14 +156,21 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
   function onLiveEvent(e: any) {
     if (e.type === "stream-end") {
       setRunning(false);
+      setThinkingText("");
       resync().then(() => {
         if (tabRef.current === "report" || template.research === false) fetchReport();
       });
       return;
     }
+    if (e.type === "token") {
+      // Never enters `events` — see the note on the thinkingText state above.
+      setThinkingText((t) => (t + String(e.payload?.t ?? "")).slice(-160));
+      return;
+    }
     setEvents((ev) => [...ev, liveEvent(e.role, e.type, e.payload)]);
     if (e.type === "phase") {
       setStageCount((n) => n + 1);
+      if (e.payload?.status === "start") setThinkingText("");
       if (e.payload?.status) setPhaseNow(String(e.payload.status));
     } else if (e.type === "step") {
       setStageCount((n) => n + 1);
@@ -312,6 +324,7 @@ export default function Workspace({ initial }: { initial: ProjectData }) {
         runPct={Math.min(95, stageCount * 10) || (project.status === "ready" ? 100 : 0)}
         runTime={`${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`}
         items={items}
+        thinkingText={thinkingText}
         expanded={expanded}
         onToggle={(key) => setExpanded((e) => ({ ...e, [key]: !e[key] }))}
         finalChips={finalChips}
