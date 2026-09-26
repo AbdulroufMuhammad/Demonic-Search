@@ -21,14 +21,14 @@ export const MODELS: Record<ModelKey, ModelConfig> = {
   omni: {
     id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     label: "Nemotron Omni",
-    note: "Reasoning",
+    note: "Reasoning · sees images",
     provider: "nvidia",
     temperature: 0.6,
     top_p: 0.95,
     max_tokens: 32768,
     extra: { reasoning_budget: 8192 },
   },
-  muse: { id: "meta/muse-glimmer-30b", label: "Muse Glimmer", note: "Experimental", provider: "nvidia", temperature: 0.9, top_p: 0.95, max_tokens: 8192 },
+  muse: { id: "meta/muse-glimmer-30b", label: "Muse Glimmer", note: "Sees images", provider: "nvidia", temperature: 0.9, top_p: 0.95, max_tokens: 8192 },
 };
 
 export const MODEL_KEYS = Object.keys(MODELS) as ModelKey[];
@@ -47,9 +47,11 @@ export const FALLBACKS: Record<ModelKey, ModelKey> = {
   deepseek: "glm",
 };
 
+export type ContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_call_id?: string;
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
 };
@@ -77,6 +79,8 @@ export type ChatOpts = {
   /** Absolute epoch ms; the whole call (including a fallback attempt) is cut off here. */
   deadline: number;
   signal?: AbortSignal;
+  /** Don't retry on the registry's backup model (e.g. image input, which the text fallbacks can't read). */
+  noFallback?: boolean;
 };
 
 export class GatewayError extends Error {
@@ -210,7 +214,7 @@ export async function chat(modelKey: ModelKey, opts: ChatOpts): Promise<ChatResu
   try {
     return await chatOnce(modelKey, opts, () => (streamed = true));
   } catch (e) {
-    if (streamed || opts.signal?.aborted) throw e;
+    if (streamed || opts.signal?.aborted || opts.noFallback) throw e;
     const timedOut = (e as any)?.name === "TimeoutError";
     const providerFailure = e instanceof GatewayError && (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500);
     const fb = FALLBACKS[modelKey];

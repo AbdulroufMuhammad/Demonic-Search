@@ -53,6 +53,18 @@ function Activity({ row }: { row: Extract<Row, { kind: "activity" }> }) {
             <li key={t.callId} className={t.error ? "err" : ""}>
               <span>{t.label}</span>
               {t.error && <span className="tool-err">{t.error}</span>}
+              {t.image && (
+                <a href={t.image} target="_blank" rel="noreferrer" className="check-shot">
+                  <img src={t.image} alt="Screenshot of the design as rendered" loading="lazy" />
+                </a>
+              )}
+              {t.findings && t.findings.length > 0 && (
+                <ul className="findings">
+                  {t.findings.map((f, i) => (
+                    <li key={i}>{f}</li>
+                  ))}
+                </ul>
+              )}
               {t.links?.slice(0, 6).map((l) =>
                 l.url ? (
                   <a key={l.url} href={l.url} target="_blank" rel="noreferrer">

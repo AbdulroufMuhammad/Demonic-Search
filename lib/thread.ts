@@ -1,6 +1,15 @@
 import type { StoredEvent, StoredMessage } from "@/lib/projectData";
 
-export type ToolRow = { callId: string; name: string; label: string; active: boolean; error?: string; links?: { title: string; url: string }[] };
+export type ToolRow = {
+  callId: string;
+  name: string;
+  label: string;
+  active: boolean;
+  error?: string;
+  links?: { title: string; url: string }[];
+  image?: string | null;
+  findings?: string[];
+};
 export type Question = { id: string; question: string; options: string[] };
 
 export type Row =
@@ -30,6 +39,9 @@ function toolLabel(name: string, p: any, done: boolean): string {
       return `${done ? "Browsed" : "Browsing"} the codebase${p.args?.path || p.path ? ` · ${p.args?.path ?? p.path}` : ""}`;
     case "repo_read":
       return `${done ? "Read" : "Reading"} ${p.args?.path ?? p.path ?? "a file"} from the codebase`;
+    case "check_design":
+      if (!done) return `Checking ${p.args?.path ?? p.path ?? "the design"} in a browser`;
+      return `Checked ${p.path ?? "the design"} · ${p.count ? `${p.count} finding${p.count > 1 ? "s" : ""}` : "looks good"}`;
     case "save_design_system":
       return done ? `Saved design system “${p.dsName ?? p.args?.name ?? ""}”` : `Saving design system “${p.args?.name ?? ""}”`;
     case "ask_questions":
@@ -98,6 +110,8 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
           active: false,
           label: toolLabel(t.name, { ...p, args: undefined }, true) || t.label,
           error: p.error,
+          image: p.image,
+          findings: p.findings,
           links: p.results?.map((r: any) => ({ title: r.title ?? host(r.url ?? ""), url: r.url })) ?? (p.source ? [{ title: p.source.title ?? host(p.source.url ?? ""), url: p.source.url }] : undefined),
         };
       }

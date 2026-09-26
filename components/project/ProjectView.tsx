@@ -28,6 +28,7 @@ import {
   IconPencil,
   IconPointer,
   IconRefresh,
+  IconScan,
   IconShare,
   IconSidebar,
   IconSliders,
@@ -605,6 +606,15 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               )}
               <button type="button" className="icon-btn" title="Reload" onClick={() => activePath && loadFile(activePath, viewVersion)} disabled={!activePath}>
                 <IconRefresh size={16} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title="Check for issues — render it in a browser, have a vision model review it, and fix what's found"
+                disabled={!activePath || running || viewVersion != null}
+                onClick={() => send(`Check "${activePath}" in the browser for visual issues and fix anything real you find.`)}
+              >
+                <IconScan size={16} />
               </button>
               <button
                 type="button"

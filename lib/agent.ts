@@ -5,6 +5,7 @@ import { FILE_TOOL_SCHEMAS, makeFileTools, cleanPath } from "@/lib/tools/files";
 import { SourceRegistry, WEB_TOOL_SCHEMAS } from "@/lib/tools/tavily";
 import { makeRepoTools, REPO_TOOL_SCHEMAS } from "@/lib/tools/github";
 import { finalizeArtifact } from "@/lib/finalize";
+import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
 import { describeForAgent, fromRow } from "@/lib/designSystems";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -44,6 +45,30 @@ const ASK_SCHEMA: ToolSchema = {
     },
   },
 };
+
+const CHECK_SCHEMA: ToolSchema = {
+  type: "function",
+  function: {
+    name: "check_design",
+    description:
+      "Render a design file in a real browser and review it: a vision model looks at screenshots for visual problems, plus automatic checks for JS errors, horizontal overflow (desktop and mobile), broken images, low-contrast and clipped text.",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  },
+};
+
+/** Automatic findings as short sentences, for the chat and the agent. */
+function automatedFindings(c: CheckResult): string[] {
+  const a = c.automated;
+  const out: string[] = [];
+  if (a.emptyPage) out.push("The page renders almost empty.");
+  for (const e of a.jsErrors) out.push(`JavaScript error: ${e}`);
+  if (a.horizontalOverflow.desktop > 2) out.push(`Content overflows sideways by ${a.horizontalOverflow.desktop}px at 1280px wide.`);
+  if (a.horizontalOverflow.mobile > 4) out.push(`Content overflows sideways by ${a.horizontalOverflow.mobile}px on a 390px phone screen.`);
+  if (a.brokenImages) out.push(`${a.brokenImages} image${a.brokenImages > 1 ? "s" : ""} failed to load.`);
+  for (const l of a.lowContrast) out.push(`Low contrast ${l.ratio}:1 on “${l.text}” (${l.fg} on ${l.bg}).`);
+  for (const t of a.clippedText) out.push(`Text is clipped: “${t}”.`);
+  return out;
+}
 
 const SAVE_DS_SCHEMA: ToolSchema = {
   type: "function",
@@ -102,6 +127,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
 - If a brand-new request leaves the important choices open (audience, content, tone, format), you may call ask_questions once with 1–4 quick questions and suggested answers instead of guessing. If the request is already specific enough, just start designing. Never ask twice in a row.
+- After you create a file or make substantial visual changes, call check_design on it once, then fix the automated findings and any high/medium issues it reports (ignore low-severity nitpicks). Skip it for tiny text edits; never check the same file more than twice in a turn.
 - If the user asks you to create, extract or define a design system, make a visual spec file for it (palette with roles and hex values, type scale, spacing/radius, core components in their states) and call save_design_system so it becomes reusable.
 - When the user comments on a specific element, you get its HTML; change that element and leave the rest alone.
 - When you're done, reply in 1–3 short sentences: what you made or changed, and optionally one idea for what to refine next. Plain prose; **bold** is fine; no headings, no code. Make no tool calls after that reply.
@@ -195,7 +221,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const template = getTemplate(project.template);
   const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
   const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), SAVE_DS_SCHEMA, ASK_SCHEMA];
+  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
 
   const msgs = (history ?? []).reverse();
   const lastUserIdx = msgs.map((m) => m.role).lastIndexOf("user");
@@ -230,10 +256,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   }
   if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
   const lastUser = [...convo].reverse().find((m) => m.role === "user");
-  if (lastUser) lastUser.content += context;
+  if (lastUser) lastUser.content = `${lastUser.content ?? ""}${context}`;
   else convo.push({ role: "user", content: `Continue.${context}` });
 
   const touched = new Map<string, { version: number; created: boolean }>();
+  const checks = new Map<string, number>();
   let badCalls = 0;
   let status: "ready" | "running" = "ready";
 
@@ -342,7 +369,9 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           const shown =
             tc.name === "write_file" || tc.name === "str_replace" || tc.name === "read_file"
               ? { path: cleanPath(args.path) }
-              : tc.name === "ask_questions"
+              : tc.name === "check_design"
+                ? { path: cleanPath(args.path) }
+                : tc.name === "ask_questions"
                 ? {}
                 : args;
           await emit({ type: "tool-call", payload: { callId, name: tc.name, args: shown } });
@@ -381,6 +410,25 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               if (!repo) throw new Error("no codebase is connected");
               result = tc.name === "repo_tree" ? await repo.repo_tree(args) : await repo.repo_read(args);
               summary = { path: args.path ?? "" };
+              break;
+            }
+            case "check_design": {
+              const f = await fileTools.read_file(args);
+              if ((checks.get(f.path) ?? 0) >= 2) throw new Error("already checked this file twice this turn — finish up");
+              if (deadline - Date.now() < 45_000) throw new Error("not enough time left in this turn to run a visual check");
+              checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
+              const c = await checkDesign(db, projectId, f.content, { deadline, signal: opts.signal });
+              const auto = automatedFindings(c);
+              const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where} — ` : ""}${i.problem}`);
+              result = {
+                path: f.path,
+                version: f.version,
+                automated_findings: auto,
+                visual_issues: c.issues,
+                overall: c.overall,
+                note: auto.length || c.issues.some((i) => i.severity !== "low") ? "Fix the automated findings and the high/medium visual issues." : "Looks good — no fixes needed.",
+              };
+              summary = { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length };
               break;
             }
             case "save_design_system": {

@@ -29,6 +29,13 @@ its URL, and the app talks to Supabase through the service-role client.
   `ask_questions` (a short brief rendered as a form). It narrates each step,
   which the chat shows as activity rows, and the file being written streams to
   the canvas as it's generated.
+- **Visual check** (`lib/tools/visualCheck.ts`) — the agent's `check_design`
+  tool renders a file in headless Chromium (`@sparticuz/chromium` on Vercel),
+  runs automatic checks (JS errors, sideways overflow at desktop and phone
+  widths, broken images, low-contrast and clipped text), and sends screenshots
+  to a vision model (Nemotron Omni, falling back to Muse Glimmer). The agent
+  fixes what's found; the chat shows the screenshot and findings, and the
+  canvas toolbar has a Check button to run it on demand.
 - **Canvas** (`components/project/Canvas.tsx`, `lib/canvasBridge.ts`) — designs
   run in an iframe sandboxed without `allow-same-origin`; a small injected
   bridge handles Comment mode (click anything → comment goes to the agent with
