@@ -456,3 +456,16 @@ code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surfac
 .ds-fonts { display: flex; flex-direction: column; gap: 14px; }
 .ds-font { display: flex; flex-direction: column; gap: 4px; }
 .ds-font-sample { font-size: 28px; line-height: 1.2; }
+
+/* Split requests: a divider per step and the plan card. */
+.phase-divider { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.phase-divider::before, .phase-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.plan-card { border: 1px solid var(--line-2); border-radius: 12px; background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.plan-head { display: flex; align-items: center; gap: 8px; text-align: left; color: var(--text); }
+.plan-label { flex: none; padding: 2px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--text); font-size: 11px; font-weight: 600; }
+.plan-title { flex: 1; font-weight: 500; font-size: 13.5px; }
+.plan-summary { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.plan-body { font-size: 12.5px; line-height: 1.55; color: var(--text-2); display: flex; flex-direction: column; gap: 6px; }
+.plan-body p { margin: 0; }
+.plan-body ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.plan-body strong { color: var(--text); font-weight: 600; }

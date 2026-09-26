@@ -19,6 +19,8 @@ export type Row =
   | { kind: "activity"; key: string; title: string; tools: ToolRow[]; active: boolean }
   | { kind: "file"; key: string; path: string; version: number }
   | { kind: "questions"; key: string; intro: string; questions: Question[]; answered: boolean }
+  | { kind: "phase"; key: string; name: string }
+  | { kind: "plan"; key: string; plan: { title: string; summary: string; direction: string; sections: { name: string; detail: string }[]; files: string[]; notes: string } }
   | { kind: "reply"; key: string; text: string; created: number; edited: number }
   | { kind: "error"; key: string; text: string };
 
@@ -126,6 +128,12 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
         else rows.push({ kind: "file", key: "f" + e.id, path: p.path, version: p.version });
         group = null;
       }
+    } else if (e.type === "phase") {
+      group = null;
+      rows.push({ kind: "phase", key: "e" + e.id, name: String(p.name ?? "") });
+    } else if (e.type === "plan" && p.plan) {
+      group = null;
+      rows.push({ kind: "plan", key: "e" + e.id, plan: p.plan });
     } else if (e.type === "questions") {
       group = null;
       rows.push({ kind: "questions", key: "e" + e.id, intro: String(p.intro ?? ""), questions: cleanQuestions(p.questions), answered: false });

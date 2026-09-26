@@ -285,6 +285,52 @@ function QuestionsCard({ row, disabled, onAnswer }: { row: Extract<Row, { kind: 
   );
 }
 
+const PHASES: Record<string, string> = { plan: "Planning", build: "Building", check: "Checking and fixing" };
+
+function PhaseDivider({ name }: { name: string }) {
+  return (
+    <div className="phase-divider">
+      <span>{PHASES[name] ?? name}</span>
+    </div>
+  );
+}
+
+/** The plan the planning step handed in: the summary shows, the rest opens on click. */
+function PlanCard({ plan }: { plan: Extract<Row, { kind: "plan" }>["plan"] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`plan-card${open ? " open" : ""}`}>
+      <button type="button" className="plan-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <span className="plan-label">Plan</span>
+        <span className="plan-title">{plan.title}</span>
+        {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+      </button>
+      {plan.summary && <p className="plan-summary">{plan.summary}</p>}
+      {open && (
+        <div className="plan-body">
+          {plan.direction && (
+            <p>
+              <strong>Direction.</strong> {plan.direction}
+            </p>
+          )}
+          {plan.sections.length > 0 && (
+            <ol>
+              {plan.sections.map((x, i) => (
+                <li key={i}>
+                  <strong>{x.name}</strong>
+                  {x.detail ? `: ${x.detail}` : ""}
+                </li>
+              ))}
+            </ol>
+          )}
+          {plan.files.length > 0 && <p className="muted">Files: {plan.files.join(", ")}</p>}
+          {plan.notes && <p className="muted">{plan.notes}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Reply({ row }: { row: Extract<Row, { kind: "reply" }> }) {
   const [vote, setVote] = useState<0 | 1 | -1>(0);
   const files = [row.created && `Created ${row.created} file${row.created > 1 ? "s" : ""}`, row.edited && `Edited ${row.edited} file${row.edited > 1 ? "s" : ""}`].filter(Boolean);
@@ -346,6 +392,10 @@ export default function Thread({
                 <IconExternal size={13} />
               </button>
             );
+          case "phase":
+            return <PhaseDivider key={row.key} name={row.name} />;
+          case "plan":
+            return <PlanCard key={row.key} plan={row.plan} />;
           case "questions":
             return <QuestionsCard key={row.key} row={row} disabled={running} onAnswer={onAnswer} />;
           case "reply":

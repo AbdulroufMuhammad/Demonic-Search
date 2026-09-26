@@ -41,7 +41,8 @@ type Pick = { id: string | null; tag: string; text: string; html: string; rect: 
 type Selection = { id: string; tag: string; style: ElementStyle };
 
 const ZOOMS = [50, 75, 100, 125, 150];
-const MAX_CONTINUATIONS = 6;
+// A split request uses two continuations (plan → build → check) on top of any time-limit resumes.
+const MAX_CONTINUATIONS = 10;
 let tempId = 0;
 
 async function readSSE(res: Response, onEvent: (e: any) => void) {

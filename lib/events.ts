@@ -9,10 +9,12 @@ export type AgentEvent = {
    * questions: the agent asked the user to fill in a short brief.
    * token / draft / message: live-only (streamed text, the file being
    * written, the final reply — which is stored in `messages` instead).
-   * continue: this invocation ran out of time with work left; the client
-   * re-POSTs with resume:true.
+   * continue: this invocation ran out of time with work left, or finished a
+   * step (plan, build) with the next one to go; the client re-POSTs with resume:true.
+   * phase: a new step of a split request starts (payload.name: plan | build | check).
+   * plan: the plan the planning step handed in (payload.plan).
    */
-  type: "thought" | "reasoning" | "note" | "tool-call" | "tool-result" | "questions" | "error" | "done" | "continue" | "token" | "draft" | "message";
+  type: "thought" | "reasoning" | "note" | "tool-call" | "tool-result" | "questions" | "error" | "done" | "continue" | "token" | "draft" | "message" | "phase" | "plan";
   payload: Record<string, unknown>;
 };
 

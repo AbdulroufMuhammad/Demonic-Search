@@ -45,6 +45,57 @@ const ASK_SCHEMA: ToolSchema = {
   },
 };
 
+const PLAN_SCHEMA: ToolSchema = {
+  type: "function",
+  function: {
+    name: "submit_plan",
+    description:
+      "Hand in the plan for this design. Ends the planning step; the build step then writes the files from exactly this plan, so make it concrete enough to build from without re-thinking.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What's being made, in a few words" },
+        summary: { type: "string", description: "One or two sentences: what it is and who it's for" },
+        direction: { type: "string", description: "Visual direction: palette (hex values), Google Fonts pairing, layout, mood" },
+        sections: {
+          type: "array",
+          description: "The parts to build, in order, each with its real content (copy, data, facts with [S#] source IDs)",
+          items: { type: "object", properties: { name: { type: "string" }, detail: { type: "string" } }, required: ["name", "detail"] },
+        },
+        files: { type: "array", items: { type: "string" }, description: 'File names to write, e.g. "Landing Page.html"' },
+        notes: { type: "string", description: "Interactions, tweaks and anything else the builder must know" },
+      },
+      required: ["title", "summary", "direction", "sections"],
+    },
+  },
+};
+
+type Plan = { title: string; summary: string; direction: string; sections: { name: string; detail: string }[]; files: string[]; notes: string };
+
+function cleanPlan(a: any): Plan {
+  const str = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n);
+  return {
+    title: str(a?.title, 120) || "Plan",
+    summary: str(a?.summary, 600),
+    direction: str(a?.direction, 1500),
+    sections: (Array.isArray(a?.sections) ? a.sections : []).slice(0, 20).map((x: any) => ({ name: str(x?.name, 120), detail: str(x?.detail, 1500) })).filter((x: any) => x.name || x.detail),
+    files: (Array.isArray(a?.files) ? a.files : []).slice(0, 5).map((f: any) => cleanPath(String(f))),
+    notes: str(a?.notes, 1500),
+  };
+}
+
+function planText(p: Plan) {
+  return [
+    `${p.title}: ${p.summary}`,
+    `Direction: ${p.direction}`,
+    ...p.sections.map((x, i) => `${i + 1}. ${x.name}: ${x.detail}`),
+    p.files.length ? `Files: ${p.files.join(", ")}` : "",
+    p.notes ? `Notes: ${p.notes}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 const APPEND_SCHEMA: ToolSchema = {
   type: "function",
   function: {
@@ -235,6 +286,17 @@ type ProjectSettings = {
   pendingCheck?: string;
   /** Reasoning cut off by the time limit before the model acted on it, handed to the next round so it doesn't start over. */
   partialThought?: string;
+  /**
+   * A new design runs as three steps, each its own invocation with its own time budget and its own section
+   * in the chat: plan (think, research, ask; hand in a plan), build (write the files from the plan) and
+   * check (browser check, fixes, reply). Small follow-up edits run as one step.
+   */
+  phase?: "plan" | "build" | "check";
+  plan?: Plan;
+  /** The phase this invocation starts fresh (not a time-limit resume within the same phase). */
+  phaseFresh?: boolean;
+  /** The build step's closing line, used as the reply when the check finds nothing to fix. */
+  buildReply?: string;
   /** The design system this project made and saved to the picker, and its spec file; revisions to that file update it. */
   savedDesignSystemId?: string;
   designSystemFile?: string;
@@ -397,7 +459,31 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     const printPages: [number, number] | null = template.id === "resume" ? [1, 1] : depth ? depth.pages : null;
     const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
     const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-    const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
+    // A new design (or a big request) is split into plan, build and check, each its own invocation.
+    const newest = (history ?? []).find((m) => m.role === "user");
+    if (!opts.resume) {
+      const big = files.length === 0 || template.id === "research" || String(newest?.content ?? "").length > 280;
+      const isEdit = !!newest?.meta?.target;
+      delete settings.plan;
+      delete settings.buildReply;
+      if (big && !isEdit && !mustScope) {
+        settings.phase = "plan";
+        settings.phaseFresh = true;
+      } else delete settings.phase;
+    }
+    const phase = settings.phase;
+    const phaseFresh = !!settings.phaseFresh;
+    if (phaseFresh) delete settings.phaseFresh;
+    const baseTools = [...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : [])];
+    const tools: ToolSchema[] =
+      // A half-written file always needs the file tools, whatever the step.
+      phase === "plan" && !settings.partial
+        ? [...baseTools, ASK_SCHEMA, PLAN_SCHEMA]
+        : phase
+          ? [...FILE_TOOL_SCHEMAS, ...baseTools, APPEND_SCHEMA, SAVE_DS_SCHEMA]
+          : [...FILE_TOOL_SCHEMAS, ...baseTools, APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
+    if (phaseFresh && phase) await emit({ type: "phase", payload: { name: phase } });
+    await db.from("projects").update({ settings }).eq("id", projectId);
 
     const all = (history ?? []).reverse();
     await describeNewImages(db, all, emit, { deadline, signal });
@@ -445,9 +531,17 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     }
     const carriedThought = settings.partialThought ?? "";
     if (carriedThought) {
-      context += `\n\nThe time limit cut you off while you were still thinking this through, before you acted. Your reasoning so far:\n"""\n${carriedThought}\n"""\nDon't start over or re-plan: take it from there and start building now (write_file first, append_file for the rest), keeping any further thinking brief.`;
+      context += `\n\nThe time limit cut you off while you were still thinking this through, before you acted. Your reasoning so far:\n"""\n${carriedThought}\n"""\n${phase === "plan" ? "Don't start over: take it from there and call submit_plan now, keeping any further thinking brief." : "Don't start over or re-plan: take it from there and start building now (write_file first, append_file for the rest), keeping any further thinking brief."}`;
     }
-    if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
+    if (phase === "plan") {
+      context +=
+        "\n\n## This step: planning\nThis request is done in three steps, each with its own time: plan (now), build, then a browser check. In this step, understand the request, research anything you need (web_search / web_fetch), ask_questions only if something essential is unclear, then call submit_plan with a concrete plan: the visual direction (palette with hex values, a Google Fonts pairing, layout), every section with its real content, the file names, and any interactions or tweaks. Don't write files in this step.";
+    } else if (phase === "build" && settings.plan) {
+      context += `\n\n## This step: building\nThe planning step produced this plan:\n"""\n${planText(settings.plan)}\n"""\nBuild it now, faithfully: write_file the design (append_file for the rest if it's long). No need to re-plan; decide any small details as you go. When the files are written, reply in one short sentence; a browser check runs as the next step.`;
+    } else if (phase === "check" && settings.plan) {
+      context += `\n\n## This step: checking\nThe design was built from this plan:\n"""\n${planText(settings.plan)}\n"""`;
+    }
+    if (opts.resume && !phaseFresh) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
     if (settings.pendingCheck && !settings.partial) {
       context += `\n\n"${settings.pendingCheck}" is written; it only still needs its browser check, which runs automatically once you reply. Unless something else is unfinished, just reply in one sentence.`;
     }
@@ -539,6 +633,12 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     };
 
     const finish = async (reply: string | null) => {
+      if (settings.phase || settings.plan || settings.buildReply) {
+        delete settings.phase;
+        delete settings.plan;
+        delete settings.buildReply;
+        await db.from("projects").update({ settings }).eq("id", projectId);
+      }
       if (reply) {
         reply = removeEmDashes(reply);
         const meta = { files: [...touched].map(([path, v]) => ({ path, ...v })) };
@@ -552,7 +652,36 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     };
 
     try {
-      for (let step = 0; step < MAX_STEPS; step++) {
+      // The check step starts with the browser check itself, no model call first; the model only comes in to fix.
+      let checkedClean = false;
+      if (phase === "check" && phaseFresh && unchecked) {
+        autoChecks++;
+        const path = unchecked;
+        const callId = "check-step";
+        await emit({ type: "note", payload: { text: "Checking the result in a real browser." } });
+        await emit({ type: "tool-call", payload: { callId, name: "check_design", args: { path } } });
+        let out: Awaited<ReturnType<typeof runCheck>> | null = null;
+        try {
+          out = await runCheck(path);
+          await emit({ type: "tool-result", payload: { callId, name: "check_design", ...out.summary } });
+        } catch (e) {
+          unchecked = null;
+          await emit({ type: "tool-result", payload: { callId, name: "check_design", path, error: e instanceof Error ? e.message : String(e) } });
+        }
+        delete settings.pendingCheck;
+        await db.from("projects").update({ settings }).eq("id", projectId);
+        if (out?.needsFix) {
+          convo.push({ role: "assistant", content: settings.buildReply || "Built it." });
+          convo.push({
+            role: "user",
+            content: `An automatic check of "${out.path}" in a real browser found these problems:\n${out.problems.map((p) => `- ${p}`).join("\n")}\nFix them now (str_replace for small fixes), then reply in one or two sentences about what you made. Don't ask the user; just fix it.`,
+          });
+        } else {
+          checkedClean = true;
+          await finish(settings.buildReply || "Done. It's on the canvas.");
+        }
+      }
+      for (let step = 0; step < MAX_STEPS && !checkedClean; step++) {
         if (signal.aborted) {
           await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
           break;
@@ -579,7 +708,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           thinkCuts < MAX_THINK_CUTS
             ? setTimeout(() => {
                 if (!acted && stepReasoning.length > 200) stepCtrl.abort(new ThinkLimit("thought too long without acting"));
-              }, THINK_LIMIT_MS)
+              }, THINK_LIMIT_MS * (phase === "plan" ? 2 : 1))
             : undefined;
         let r;
         try {
@@ -631,11 +760,22 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             // Told to act, reasoning models tend to keep deliberating, so a model that doesn't reason builds from the plan.
             if (!buildModel && (buildModel ?? currentModel) !== BUILD_MODEL) {
               buildModel = BUILD_MODEL;
-              await emit({ type: "note", payload: { text: `Plan's ready; handing the build to ${MODELS[BUILD_MODEL].label} so it starts writing now.` } });
+              await emit({
+                type: "note",
+                payload: {
+                  text:
+                    phase === "plan"
+                      ? `Thought it through; handing the write-up of the plan to ${MODELS[BUILD_MODEL].label}.`
+                      : `Plan's ready; handing the build to ${MODELS[BUILD_MODEL].label} so it starts writing now.`,
+                },
+              });
             }
             convo.push({
               role: "user",
-              content: `You've planned enough; time to build. Your plan so far:\n"""\n${plan.slice(-6000)}\n"""\nAct on it now: call write_file with the design (append_file for the rest if it's long). Keep any further thinking to a few sentences; you can refine after the first version is on the canvas.`,
+              content:
+                phase === "plan"
+                  ? `You've thought enough; time to hand in the plan. Your thinking so far:\n"""\n${plan.slice(-6000)}\n"""\nCall submit_plan now with a concrete plan based on it. Keep any further thinking to a few sentences.`
+                  : `You've planned enough; time to build. Your plan so far:\n"""\n${plan.slice(-6000)}\n"""\nAct on it now: call write_file with the design (append_file for the rest if it's long). Keep any further thinking to a few sentences; you can refine after the first version is on the canvas.`,
             });
             continue;
           }
@@ -680,6 +820,19 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 : "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
             });
             continue;
+          }
+          // The build step is done: the browser check runs as its own step, with its own time.
+          if (phase === "build" && unchecked) {
+            const specFile = dsSpecFile();
+            if (specFile) await autoSaveDesignSystem(specFile);
+            settings.phase = "check";
+            settings.phaseFresh = true;
+            settings.pendingCheck = unchecked;
+            settings.buildReply = removeEmDashes(text).slice(0, 600);
+            await db.from("projects").update({ settings }).eq("id", projectId);
+            status = "paused";
+            await emit({ type: "continue", payload: {} });
+            break;
           }
           const tooLate = deadline - Date.now() < CHECK_MIN_MS;
           // Postpone a check to the next round at most once, so a short round can never pause forever.
@@ -736,6 +889,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         });
 
         let asked = false;
+        let planned = false;
         for (const [i, tc] of r.toolCalls.entries()) {
           const callId = `${step}-${i}-${tc.id || ""}`;
           const toolCallId = tc.id || `call_${step}_${i}`;
@@ -843,6 +997,17 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 summary = { dsName: saved.name, system: saved };
                 break;
               }
+              case "submit_plan": {
+                const plan = cleanPlan(args);
+                settings.plan = plan;
+                settings.phase = "build";
+                settings.phaseFresh = true;
+                await db.from("projects").update({ settings }).eq("id", projectId);
+                await emit({ type: "plan", payload: { plan } });
+                result = { ok: true, note: "Plan saved. The build step starts next, with its own time." };
+                planned = true;
+                break;
+              }
               case "ask_questions": {
                 const cleaned = cleanQuestions(args.questions);
                 const questions = template.id === "research" ? withDepthQuestion(cleaned) : cleaned;
@@ -866,6 +1031,12 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         }
         await touch();
         if (asked) break;
+        // The plan is in: this invocation ends and the build step starts fresh, with its own time budget.
+        if (planned) {
+          status = "paused";
+          await emit({ type: "continue", payload: {} });
+          break;
+        }
         if (badCalls > 5) {
           await emit({ type: "error", payload: { message: "Too many failed tool calls, so I stopped here." } });
           break;

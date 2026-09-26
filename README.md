@@ -44,6 +44,14 @@ its URL, and the app talks to Supabase through the service-role client.
   doesn't, the tokens are read from the spec file's CSS variables and fonts
   (`lib/extractDesignSystem.ts`). Later revisions of that spec update the same
   saved system instead of adding copies.
+- **Split runs** — a new design (or a big request) runs as three steps, each
+  its own serverless invocation with its own time budget and its own section
+  in the chat: **planning** (think, research, ask; hand in a plan with
+  `submit_plan`, shown as a plan card), **building** (write the files from the
+  plan) and **checking** (browser check first, then fixes and the reply).
+  Small follow-up edits run as one step. A step that only deliberates for 75s
+  (150s when planning) is cut, its thinking kept, and the rest of the turn is
+  handed to DeepSeek V3 with that plan.
 - **Visual check** (`lib/tools/visualCheck.ts`) — the agent's `check_design`
   tool renders a file in headless Chromium (`@sparticuz/chromium` on Vercel),
   runs automatic checks (JS errors, sideways overflow at desktop and phone
