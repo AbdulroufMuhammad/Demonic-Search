@@ -22,6 +22,14 @@ const STOP_MARGIN_MS = 20_000;
 const MAX_STEPS = 30;
 // Well inside STALE_RUN_MS (lib/projectData.ts), after which a silent run counts as dead.
 const HEARTBEAT_MS = 10_000;
+// A step that has only been thinking this long (nothing written, no tool call) is stopped and told to act on its plan.
+// Reasoning models otherwise deliberate for the whole turn: GLM spent 270s planning a business card.
+const THINK_LIMIT_MS = Number(process.env.THINK_LIMIT_MS ?? 75_000);
+const MAX_THINK_CUTS = 2;
+
+class ThinkLimit extends Error {
+  name = "ThinkLimit";
+}
 const MAX_ACTIVE_FILE_CHARS = 60_000;
 // A browser check needs this much turn time left: ~35s to render, ~45s to review, plus the fix that follows.
 const CHECK_MIN_MS = 90_000;
@@ -151,6 +159,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - Printable documents (résumés, one-pagers, reports, letters) are designed as paper. Set an @page rule with the size and margins, declare the intended page count with <meta name="pages" content="1"> (or a range like "3-5"), and make it print to exactly that. The printed layout must match the screen layout (same columns and sidebar): keep phone-only rules for screens with @media screen and (max-width: …), and use break-inside: avoid on entries (and break-after: avoid on headings) so nothing splits awkwardly. The automatic check prints the file and tells you the real page count; if it's over, tighten spacing and type or trim wording, never let it spill onto an extra page.
 
 ## How you work
+- Think briefly and practically: decide the direction, then build. Don't deliberate at length over details (exact pixel values, alternatives you won't use); the first version can be refined after it's on the canvas.
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
 - If a request leaves important choices open (what it's for, audience, content, features or sections needed, tone, format), call ask_questions with a proper form instead of guessing: ask everything you actually need in one go (usually 3–6 questions), each with the field type that fits. Use single for one-of choices, multi (checkboxes) for picking several, like features, sections or pages needed, select for a long list, text for names and specifics, long for descriptions, number or slider for quantities (e.g. how many screens or slides), and toggle for yes/no. Give concrete options, not vague ones, and preselect a sensible default where one is obvious. If the request is already specific enough, just start designing. Never ask twice in a row; once answered, design with what you have and decide anything left open yourself.
 - Every file you write is checked automatically in a real browser before your reply reaches the user, and any real problems come back to you to fix. You can also call check_design yourself mid-way. When problems come back, fix them directly; don't ask the user.
@@ -483,6 +492,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     };
     const checkDeferred = !!settings.pendingCheck;
     let badCalls = 0;
+    let thinkCuts = 0;
     let status: "ready" | "paused" = "ready";
     // The write_file call being streamed, so a turn cut off by the time limit can hand its partial file to the next round.
     let writing: { path: string; args: string } | null = null;
@@ -555,14 +565,26 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         const drafts = new Map<number, { path: string; sent: number; at: number }>();
         const stepStart = Date.now();
         let stepReasoning = "";
+        // Per-step abort, so a step that only deliberates can be cut without stopping the turn.
+        const stepCtrl = new AbortController();
+        const onTurnAbort = () => stepCtrl.abort(signal.reason);
+        signal.addEventListener("abort", onTurnAbort);
+        let acted = false;
+        const thinkTimer =
+          thinkCuts < MAX_THINK_CUTS
+            ? setTimeout(() => {
+                if (!acted && stepReasoning.length > 200) stepCtrl.abort(new ThinkLimit("thought too long without acting"));
+              }, THINK_LIMIT_MS)
+            : undefined;
         let r;
         try {
           r = await chat(currentModel, {
             messages: convo,
             tools,
             deadline,
-            signal,
+            signal: stepCtrl.signal,
             onToken: (t) => {
+              acted = true;
               void emit({ type: "token", payload: { t } });
             },
             onReasoning: (t) => {
@@ -570,6 +592,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               void emit({ type: "reasoning", payload: { t } });
             },
             onToolDelta: (index, name, args) => {
+              acted = true;
               if (name !== "write_file") return;
               const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
               const now = Date.now();
@@ -596,6 +619,16 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
             break;
           }
+          if (e instanceof ThinkLimit || (e as any)?.name === "ThinkLimit") {
+            thinkCuts++;
+            const plan = stepReasoning.trim();
+            await emit({ type: "thought", payload: { text: plan.length > 12000 ? "…" + plan.slice(-12000) : plan, ms: Date.now() - stepStart } });
+            convo.push({
+              role: "user",
+              content: `You've planned enough; time to build. Your plan so far:\n"""\n${plan.slice(-6000)}\n"""\nAct on it now: call write_file with the design (append_file for the rest if it's long). Keep any further thinking to a few sentences; you can refine after the first version is on the canvas.`,
+            });
+            continue;
+          }
           if ((e as any)?.name === "TimeoutError" && deadline - Date.now() < STOP_MARGIN_MS + 5000) {
             await savePartial();
             // Long thinking that ran out the clock is kept (in the chat and for the next round), not thrown away.
@@ -611,6 +644,9 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           }
           await emit({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
           break;
+        } finally {
+          clearTimeout(thinkTimer);
+          signal.removeEventListener("abort", onTurnAbort);
         }
 
         writing = null;
