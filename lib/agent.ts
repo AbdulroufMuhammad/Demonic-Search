@@ -7,6 +7,7 @@ import { makeRepoTools, REPO_TOOL_SCHEMAS } from "@/lib/tools/github";
 import { finalizeArtifact, removeEmDashes } from "@/lib/finalize";
 import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
+import { extractDesignSystem } from "@/lib/extractDesignSystem";
 import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
 import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -109,7 +110,12 @@ const SAVE_DS_SCHEMA: ToolSchema = {
   },
 };
 
-async function saveDesignSystem(db: SupabaseClient, projectId: string, args: any) {
+/**
+ * Save a design system to the picker and apply it to this project. A project
+ * keeps one saved system: later saves (the spec being revised) update that
+ * row instead of adding duplicates, unless it was deleted meanwhile.
+ */
+async function saveDesignSystem(db: SupabaseClient, projectId: string, settings: ProjectSettings, args: any) {
   const colors = (Array.isArray(args.colors) ? args.colors : [])
     .map((c: any) => ({ name: String(c?.name ?? "Color").slice(0, 40), hex: String(c?.hex ?? "").trim().toLowerCase() }))
     .map((c: any) => (/^#[0-9a-f]{3}$/.test(c.hex) ? { ...c, hex: "#" + [...c.hex.slice(1)].map((ch) => ch + ch).join("") } : c))
@@ -122,9 +128,19 @@ async function saveDesignSystem(db: SupabaseClient, projectId: string, args: any
   if (colors.length < 2) throw new Error("give at least two colors as #rrggbb hex values");
   if (!fonts.length) throw new Error("give at least one font");
   const name = String(args.name ?? "").trim().slice(0, 60) || "Untitled system";
-  const { data, error } = await db.from("design_systems").insert({ owner_id: null, name, tokens: { colors, fonts } }).select("*").single();
-  if (error || !data) throw new Error(`saving the design system failed: ${error?.message}`);
-  await db.from("projects").update({ design_system_id: data.id }).eq("id", projectId);
+  const row = { name, tokens: { colors, fonts }, updated_at: new Date().toISOString() };
+  let data: any = null;
+  if (settings.savedDesignSystemId) {
+    const res = await db.from("design_systems").update(row).eq("id", settings.savedDesignSystemId).select("*");
+    data = res.data?.[0] ?? null;
+  }
+  if (!data) {
+    const res = await db.from("design_systems").insert({ owner_id: null, ...row }).select("*").single();
+    if (res.error || !res.data) throw new Error(`saving the design system failed: ${res.error?.message}`);
+    data = res.data;
+  }
+  settings.savedDesignSystemId = data.id;
+  await db.from("projects").update({ design_system_id: data.id, settings }).eq("id", projectId);
   return fromRow(data);
 }
 
@@ -201,6 +217,9 @@ type ProjectSettings = {
   partial?: { path: string; content: string };
   /** A file written right before a pause that still needs its browser check. */
   pendingCheck?: string;
+  /** The design system this project made and saved to the picker, and its spec file; revisions to that file update it. */
+  savedDesignSystemId?: string;
+  designSystemFile?: string;
 };
 type HistoryMessage = { id: string; role: string; content: string; meta: any; created_at: string };
 
@@ -262,7 +281,9 @@ async function summarizeOlder(db: SupabaseClient, projectId: string, settings: P
     // Keep going without a fresh summary; the older cached one (if any) is still useful.
   }
   if (!text) return cached?.text ?? "";
-  await db.from("projects").update({ settings: { ...settings, summary: { upTo, text } } }).eq("id", projectId);
+  // Kept on the turn's settings object too, so its later writes (pending check, partial file) don't drop it.
+  settings.summary = { upTo, text };
+  await db.from("projects").update({ settings }).eq("id", projectId);
   return text;
 }
 
@@ -395,9 +416,35 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   let autoChecks = 0;
   // A request for a design system isn't done until it's saved to the picker.
   const latestRequest = [...recent].reverse().find((m) => m.role === "user")?.content ?? "";
-  const wantsDesignSystem = template.id === "designsystem" || /design[- ]system/i.test(latestRequest);
+  const wantsDesignSystem =
+    template.id === "designsystem" ||
+    !!settings.savedDesignSystemId ||
+    // "make a motion design system", "turn this into a design system"; not "a landing page using my design system".
+    /\b(create|make|build|generate|extract|define|set up|into)\s+(me\s+)?(a|an|the|our|my|new)?\s*([\w,'-]+\s+){0,3}design[- ]system/i.test(latestRequest);
   let dsSaved = false;
   let dsNudged = false;
+  // The spec file this turn wrote that the saved design system should match, if any.
+  const dsSpecFile = () => {
+    if (!wantsDesignSystem || dsSaved || !touched.size) return null;
+    const known = settings.designSystemFile;
+    return known ? (touched.has(known) ? known : null) : [...touched.keys()].pop()!;
+  };
+  // The model didn't save the design system it made: read the tokens out of the spec file itself.
+  const autoSaveDesignSystem = async (path: string) => {
+    const callId = `auto-save-ds-${Date.now()}`;
+    try {
+      const { content } = await fileTools.read_file({ path });
+      const tokens = extractDesignSystem(content, project.title ?? latestRequest);
+      if (!tokens) return;
+      await emit({ type: "tool-call", payload: { callId, name: "save_design_system", args: { name: tokens.name } } });
+      settings.designSystemFile = path;
+      const saved = await saveDesignSystem(db, projectId, settings, tokens);
+      dsSaved = true;
+      await emit({ type: "tool-result", payload: { callId, name: "save_design_system", dsName: saved.name, system: saved } });
+    } catch (e) {
+      await emit({ type: "tool-result", payload: { callId, name: "save_design_system", error: e instanceof Error ? e.message : String(e) } });
+    }
+  };
   const checkDeferred = !!settings.pendingCheck;
   let badCalls = 0;
   let status: "ready" | "paused" = "ready";
@@ -539,13 +586,14 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       const text = r.content.trim();
       if (!r.toolCalls.length) {
         // Never hand back unverified work: check the last written file in a real browser and send real problems back to the model.
-        if (wantsDesignSystem && !dsSaved && !dsNudged && touched.size) {
+        if (dsSpecFile() && !dsNudged) {
           dsNudged = true;
           convo.push({ role: "assistant", content: r.content || "Done." });
           convo.push({
             role: "user",
-            content:
-              "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
+            content: settings.savedDesignSystemId
+              ? "You changed the design system spec, so the saved copy in the design system picker is out of date. Call save_design_system again with the current palette (named colors, as #rrggbb) and fonts, then reply in one sentence."
+              : "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
           });
           continue;
         }
@@ -589,6 +637,8 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           delete settings.pendingCheck;
           await db.from("projects").update({ settings }).eq("id", projectId);
         }
+        const specFile = dsSpecFile();
+        if (specFile) await autoSaveDesignSystem(specFile);
         await finish(text || (touched.size ? "Done. It's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
         break;
       }
@@ -688,8 +738,9 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               break;
             }
             case "save_design_system": {
+              if (!settings.designSystemFile && touched.size) settings.designSystemFile = [...touched.keys()].pop();
+              const saved = await saveDesignSystem(db, projectId, settings, args);
               dsSaved = true;
-              const saved = await saveDesignSystem(db, projectId, args);
               result = { ok: true, id: saved.id, note: "Saved. It's now in the design system picker and set as this project's design system." };
               summary = { dsName: saved.name, system: saved };
               break;

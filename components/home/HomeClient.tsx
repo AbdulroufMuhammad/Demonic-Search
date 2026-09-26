@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { TEMPLATES, getTemplate } from "@/lib/templates";
+import { TEMPLATES, getTemplate, prefillPrompt, subjectOf } from "@/lib/templates";
 import type { DesignSystem } from "@/lib/designSystems";
 import type { ModelKey } from "@/lib/gateway";
 import TemplateIcon from "@/components/home/TemplateIcon";
@@ -36,6 +36,37 @@ export default function HomeClient({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ta = useRef<HTMLTextAreaElement>(null);
+  const selectAfter = useRef<[number, number] | null>(null);
+
+  // Grow the box with a prefilled prompt (field-sizing isn't supported everywhere), then select the example subject.
+  useEffect(() => {
+    const el = ta.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+    if (selectAfter.current) {
+      el.focus();
+      el.setSelectionRange(...selectAfter.current);
+      selectAfter.current = null;
+    }
+  }, [prompt]);
+
+  // Picking a template writes its full prompt and process into the box, keeping
+  // what the user already said it's for; their own longer writing is never overwritten.
+  function chooseTemplate(id: string) {
+    setTemplate(id);
+    const subject = subjectOf(prompt);
+    const t = getTemplate(id);
+    if (subject === null) return ta.current?.focus();
+    const next = prefillPrompt(t, subject || undefined);
+    // Blank has no prompt of its own: it clears an untouched prefill and leaves anything edited alone.
+    if (!next) {
+      if (subject === "") setPrompt("");
+      return ta.current?.focus();
+    }
+    setPrompt(next.text);
+    selectAfter.current = [next.start, next.end];
+  }
 
   useEffect(() => {
     try {
@@ -82,7 +113,7 @@ export default function HomeClient({
             <textarea
               ref={ta}
               className="home-textarea"
-              placeholder={getTemplate(template).placeholder}
+              placeholder={getTemplate(template).placeholder ?? "Describe what you want to create…"}
               value={prompt}
               rows={2}
               onChange={(e) => setPrompt(e.target.value)}
@@ -140,10 +171,7 @@ export default function HomeClient({
                     key={t.id}
                     type="button"
                     className={`template-tile${template === t.id ? " selected" : ""}`}
-                    onClick={() => {
-                      setTemplate(t.id);
-                      ta.current?.focus();
-                    }}
+                    onClick={() => chooseTemplate(t.id)}
                   >
                     <TemplateIcon id={t.id} />
                     <span>{t.label}</span>

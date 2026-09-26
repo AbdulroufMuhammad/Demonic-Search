@@ -17,8 +17,12 @@ its URL, and the app talks to Supabase through the service-role client.
 - **Home** (`app/page.tsx`, `components/home/*`) — composer with a design
   system picker, model picker and GitHub codebase picker; a template grid
   (Blank, Mobile app, Slides, Document, Wireframe, Animation, UI mockups,
-  Résumé, 3D object, Research, HTML email, Color + type pairing); and a
-  projects table/grid with live thumbnails.
+  Résumé, 3D object, Landing page, Design system, Research, HTML email,
+  Color + type pairing); and a projects table/grid with live thumbnails.
+  Picking a template (other than Blank) prefills the prompt with a complete
+  request and that template's own step-by-step process (`lib/templates.ts`);
+  the example subject is selected so typing replaces it, and it carries over
+  when you switch templates.
 - **Workspace** (`components/project/*`) — the same for every project: chat on
   the left, canvas on the right. A template is only a hint to the agent; it
   never changes the UI.
@@ -29,6 +33,12 @@ its URL, and the app talks to Supabase through the service-role client.
   `ask_questions` (a short brief rendered as a form). It narrates each step,
   which the chat shows as activity rows, and the file being written streams to
   the canvas as it's generated.
+- **Design systems** — when a project makes a design system (the Design system
+  template, or asking for one), it's saved to the design system picker and
+  applied to the project. The agent saves it with `save_design_system`; if it
+  doesn't, the tokens are read from the spec file's CSS variables and fonts
+  (`lib/extractDesignSystem.ts`). Later revisions of that spec update the same
+  saved system instead of adding copies.
 - **Visual check** (`lib/tools/visualCheck.ts`) — the agent's `check_design`
   tool renders a file in headless Chromium (`@sparticuz/chromium` on Vercel),
   runs automatic checks (JS errors, sideways overflow at desktop and phone
