@@ -170,7 +170,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
 }
 
 async function render(html: string, printTarget: [number, number] | null): Promise<{ automated: Automated; tiles: Buffer[]; printTiles: Buffer[] }> {
+  // Step timings go to the server log, so a slow check can be traced to the step that's slow.
+  const t0 = Date.now();
+  const laps: string[] = [];
+  const lap = (step: string) => laps.push(`${step} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   const browser = await launchBrowser();
+  lap("launch");
   const tiles: Buffer[] = [];
   const printTiles: Buffer[] = [];
   // A known page target (a résumé, a research depth) is checked even if the design forgot its @page rule.
@@ -178,6 +183,7 @@ async function render(html: string, printTarget: [number, number] | null): Promi
   try {
     const jsErrors: string[] = [];
     const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
+    lap("open");
     // Canvas and WebGL scenes: give them a moment to draw, then stop their animation loops. Software WebGL on the
     // server runs at a few frames a second, and an endless render loop starves the screenshots until they time out.
     if (/<canvas|three|webgl|requestAnimationFrame/i.test(html)) {
@@ -185,13 +191,16 @@ async function render(html: string, printTarget: [number, number] | null): Promi
       await page.evaluate("window.requestAnimationFrame = () => 0").catch(() => {});
       await page.waitForTimeout(300);
     }
+    lap("settle");
     const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
+    lap("inspect");
     const height = Math.min(desktop.height, TILE * (printable ? 2 : MAX_TILES));
     for (let y = 0; y < height; y += TILE) {
       const shot = await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, timeout: 12_000, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }).catch(() => null);
       if (!shot) break;
       tiles.push(shot);
     }
+    lap(`screenshots(${tiles.length})`);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);
     const mobile = (await page.evaluate("Math.max(0, document.documentElement.scrollWidth - window.innerWidth)")) as number;
@@ -211,6 +220,7 @@ async function render(html: string, printTarget: [number, number] | null): Promi
         printTiles.push(await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: area.width, height: Math.min(area.height, full - y) } }));
       }
     }
+    lap("done");
     return {
       tiles,
       printTiles,
@@ -226,6 +236,7 @@ async function render(html: string, printTarget: [number, number] | null): Promi
       },
     };
   } finally {
+    console.log(`[check] ${laps.join(", ")}`);
     await browser.close().catch(() => {});
   }
 }
@@ -239,10 +250,12 @@ export async function checkDesign(
   db: SupabaseClient,
   projectId: string,
   html: string,
-  opts: { deadline: number; signal?: AbortSignal; request?: string; printPages?: [number, number] | null }
+  opts: { deadline: number; signal?: AbortSignal; request?: string; printPages?: [number, number] | null; renderTimeoutMs?: number }
 ): Promise<CheckResult> {
   // Rendering is capped: a browser that can't start or a page that never settles must not stall the turn.
-  const { automated, tiles, printTiles } = await withTimeout(render(html, opts.printPages ?? null), RENDER_TIMEOUT_MS, "the page took too long to render");
+  // The check step has its own invocation, so it can allow heavy pages (software WebGL) more time.
+  const renderCap = Math.min(opts.renderTimeoutMs ?? RENDER_TIMEOUT_MS, Math.max(10_000, opts.deadline - Date.now() - 25_000));
+  const { automated, tiles, printTiles } = await withTimeout(render(html, opts.printPages ?? null), renderCap, "the page took too long to render");
 
   let screenshotUrl: string | null = null;
   if (tiles[0]) {
