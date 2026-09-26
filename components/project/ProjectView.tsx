@@ -75,6 +75,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   const [activePath, setActivePath] = useState<string | null>(initial.files[0]?.path ?? null);
   const [viewVersion, setViewVersion] = useState<number | null>(null);
   const [html, setHtml] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [docKey, setDocKey] = useState("init");
   const [draft, setDraft] = useState<{ path: string; html: string } | null>(null);
 
@@ -97,6 +98,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   const threadEnd = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const draftBuf = useRef<{ path: string; html: string } | null>(null);
+  const draftingPath = useRef<string | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout>>();
   const willContinue = useRef(false);
   const continuations = useRef(0);
@@ -112,12 +114,21 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   // ---------- data ----------
   const loadFile = useCallback(
     async (path: string, version?: number | null) => {
-      const res = await fetch(`/api/projects/${project.id}/file?path=${encodeURIComponent(path)}${version ? `&version=${version}` : ""}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (path !== activePathRef.current) return;
-      setHtml(data.content);
-      setDocKey(`${path}@${data.version}@${Date.now()}`);
+      const url = `/api/projects/${project.id}/file?path=${encodeURIComponent(path)}${version ? `&version=${version}` : ""}`;
+      setLoadError(false);
+      // A file that was just written can take a moment to become readable; retry briefly before giving up.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, 700 * attempt));
+        if (path !== activePathRef.current) return;
+        const res = await fetch(url, { cache: "no-store" }).catch(() => null);
+        if (!res?.ok) continue;
+        const data = await res.json();
+        if (path !== activePathRef.current) return;
+        setHtml(data.content);
+        setDocKey(`${path}@${data.version}@${Date.now()}`);
+        return;
+      }
+      if (path === activePathRef.current) setLoadError(true);
     },
     [project.id]
   );
@@ -134,8 +145,9 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   }, [project.id]);
 
   useEffect(() => {
-    if (activePath) loadFile(activePath, viewVersion);
-    else setHtml(null);
+    // While a new file is still streaming in there's nothing to fetch yet — the draft is shown instead.
+    if (activePath && activePath !== draftingPath.current) loadFile(activePath, viewVersion);
+    else if (!activePath) setHtml(null);
     setPages(0);
     setTweaks([]);
     setTweakValues({});
@@ -163,6 +175,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           const html = (p.reset || !cur || cur.path !== p.path ? "" : cur.html) + String(p.append ?? "");
           draftBuf.current = { path: p.path, html };
           if (p.reset) {
+            draftingPath.current = p.path;
             setActivePath(p.path);
             setViewVersion(null);
             setMode("view");
@@ -204,6 +217,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       }
       if (e.type === "tool-result" && (p.name === "write_file" || p.name === "str_replace") && !p.error && p.path) {
         draftBuf.current = null;
+        draftingPath.current = null;
         clearTimeout(draftTimer.current);
         draftTimer.current = undefined;
         setDraft(null);
@@ -258,6 +272,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       }
       abortRef.current = null;
       draftBuf.current = null;
+      draftingPath.current = null;
       setDraft(null);
       setLiveText("");
       setLiveReasoning("");
@@ -763,7 +778,16 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                     <p>Designing…</p>
                   </div>
                 ) : (
-                  <p>{files.length ? "Loading…" : "Your designs will appear here."}</p>
+                  loadError && activePath ? (
+                    <div className="stage-working">
+                      <p>Couldn&rsquo;t load {activePath}.</p>
+                      <button type="button" className="btn-secondary sm" onClick={() => loadFile(activePath, viewVersion)}>
+                        Retry
+                      </button>
+                    </div>
+                  ) : (
+                    <p>{files.length ? "Loading…" : "Your designs will appear here."}</p>
+                  )
                 )}
               </div>
             )}

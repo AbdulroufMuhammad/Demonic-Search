@@ -280,7 +280,13 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             d.at = now;
             const path = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(args)?.[1];
             const content = partialJsonString(args, "content");
-            if (path && !d.path) d.path = cleanPath(path);
+            if (path && !d.path) {
+              try {
+                d.path = cleanPath(JSON.parse(`"${path}"`));
+              } catch {
+                d.path = cleanPath(path);
+              }
+            }
             drafts.set(index, d);
             if (!d.path || content == null || content.length <= d.sent) return;
             void emit({ type: "draft", payload: { path: d.path, append: content.slice(d.sent), reset: d.sent === 0 } });
