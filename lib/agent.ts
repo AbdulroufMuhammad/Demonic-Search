@@ -10,6 +10,7 @@ import { getTemplate } from "@/lib/templates";
 import { extractDesignSystem } from "@/lib/extractDesignSystem";
 import { ASK_PARAMETERS, cleanQuestions } from "@/lib/questions";
 import { DEFAULT_DEPTH, depthFrom, withDepthQuestion } from "@/lib/research";
+import { planPreviewHtml } from "@/lib/planPreview";
 import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
 import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -24,7 +25,7 @@ const MAX_STEPS = 30;
 const HEARTBEAT_MS = 10_000;
 // A step that has only been thinking this long (nothing written, no tool call) is stopped and told to act on its plan.
 // Reasoning models otherwise deliberate for the whole turn: GLM spent 270s planning a business card.
-const THINK_LIMIT_MS = Number(process.env.THINK_LIMIT_MS ?? 75_000);
+const THINK_LIMIT_MS = Number(process.env.THINK_LIMIT_MS ?? 45_000);
 const MAX_THINK_CUTS = 2;
 const BUILD_MODEL: ModelKey = "deepseek";
 
@@ -297,6 +298,8 @@ type ProjectSettings = {
   phaseFresh?: boolean;
   /** The build step's closing line, used as the reply when the check finds nothing to fix. */
   buildReply?: string;
+  /** The model that took over from a reasoning model that deliberated too long; kept for the rest of the request. */
+  buildModel?: ModelKey;
   /** The design system this project made and saved to the picker, and its spec file; revisions to that file update it. */
   savedDesignSystemId?: string;
   designSystemFile?: string;
@@ -414,6 +417,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   // Set when a reasoning model deliberated past the thinking budget: the rest of the turn builds with a fast,
   // non-reasoning model. Picking a model mid-run clears it.
   let buildModel: ModelKey | null = null;
+  let settingsRef: ProjectSettings | null = null;
   const stillOwner = async () => {
     const { data: live } = await db.from("projects").select("status, run_id, model_profile").eq("id", projectId).single();
     const ok = !!live && live.status !== "stopped" && (!opts.runId || live.run_id === opts.runId);
@@ -421,6 +425,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     else if (live.model_profile && modelKeyFor(live.model_profile) !== currentModel) {
       currentModel = modelKeyFor(live.model_profile);
       buildModel = null;
+      if (settingsRef?.buildModel) delete settingsRef.buildModel;
       await emit({ type: "note", payload: { text: `Switched to ${MODELS[currentModel].label}.` } });
     }
     return ok;
@@ -440,6 +445,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   try {
 
     const settings = (project.settings ?? {}) as ProjectSettings;
+    settingsRef = settings;
     const dsIds = [project.design_system_id, ...(settings.designSystems ?? [])].filter((v, i, a): v is string => !!v && a.indexOf(v) === i);
     const [{ data: dsRows }, { data: history }, files, sources] = await Promise.all([
       dsIds.length ? db.from("design_systems").select("*").in("id", dsIds) : Promise.resolve({ data: [] as any[] }),
@@ -466,12 +472,15 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       const isEdit = !!newest?.meta?.target;
       delete settings.plan;
       delete settings.buildReply;
+      delete settings.buildModel;
       if (big && !isEdit && !mustScope) {
         settings.phase = "plan";
         settings.phaseFresh = true;
       } else delete settings.phase;
     }
     const phase = settings.phase;
+    // A later step of the same request keeps the model that took over, so it doesn't pay the thinking wait again.
+    if (phase && settings.buildModel && !buildModel) buildModel = settings.buildModel;
     const phaseFresh = !!settings.phaseFresh;
     if (phaseFresh) delete settings.phaseFresh;
     const baseTools = [...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : [])];
@@ -633,10 +642,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     };
 
     const finish = async (reply: string | null) => {
-      if (settings.phase || settings.plan || settings.buildReply) {
+      if (settings.phase || settings.plan || settings.buildReply || settings.buildModel) {
         delete settings.phase;
         delete settings.plan;
         delete settings.buildReply;
+        delete settings.buildModel;
         await db.from("projects").update({ settings }).eq("id", projectId);
       }
       if (reply) {
@@ -696,7 +706,8 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           break;
         }
 
-        const drafts = new Map<number, { path: string; sent: number; at: number }>();
+        // base: for append_file, the file so far (undefined until requested, null while loading).
+        const drafts = new Map<number, { path: string; sent: number; at: number; base?: string | null }>();
         const stepStart = Date.now();
         let stepReasoning = "";
         // Per-step abort, so a step that only deliberates can be cut without stopping the turn.
@@ -727,7 +738,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             },
             onToolDelta: (index, name, args) => {
               acted = true;
-              if (name !== "write_file") return;
+              if (name !== "write_file" && name !== "append_file") return;
               const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
               const now = Date.now();
               if (now - d.at < 250) return;
@@ -742,6 +753,21 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 }
               }
               drafts.set(index, d);
+              // An added part streams onto what's already written, so the canvas grows live instead of jumping at the end.
+              if (name === "append_file") {
+                if (!d.path) return;
+                if (d.base === undefined) {
+                  d.base = null;
+                  const target = d.path;
+                  const saved = settings.partial?.path === target ? settings.partial.content : null;
+                  (saved != null ? Promise.resolve(saved) : fileTools.read_file({ path: target }).then((f) => f.content, () => ""))
+                    .then((b) => (d.base = b.replace(/<\/body>\s*<\/html>\s*$/i, "")));
+                }
+                if (d.base == null || content == null || content.length <= d.sent) return;
+                void emit({ type: "draft", payload: { path: d.path, append: d.sent === 0 ? d.base + content : content.slice(d.sent), reset: d.sent === 0 } });
+                d.sent = content.length;
+                return;
+              }
               if (d.path) writing = { path: d.path, args };
               if (!d.path || content == null || content.length <= d.sent) return;
               void emit({ type: "draft", payload: { path: d.path, append: content.slice(d.sent), reset: d.sent === 0 } });
@@ -760,6 +786,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             // Told to act, reasoning models tend to keep deliberating, so a model that doesn't reason builds from the plan.
             if (!buildModel && (buildModel ?? currentModel) !== BUILD_MODEL) {
               buildModel = BUILD_MODEL;
+              if (phase) {
+                settings.buildModel = BUILD_MODEL;
+                await db.from("projects").update({ settings }).eq("id", projectId);
+              }
               await emit({
                 type: "note",
                 payload: {
@@ -1004,6 +1034,8 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 settings.phaseFresh = true;
                 await db.from("projects").update({ settings }).eq("id", projectId);
                 await emit({ type: "plan", payload: { plan } });
+                // The canvas shows the plan's shape right away; the real file streams over it once building starts.
+                await emit({ type: "draft", payload: { path: plan.files[0] ?? cleanPath(plan.title), append: planPreviewHtml(plan), reset: true } });
                 result = { ok: true, note: "Plan saved. The build step starts next, with its own time." };
                 planned = true;
                 break;

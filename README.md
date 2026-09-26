@@ -49,9 +49,12 @@ its URL, and the app talks to Supabase through the service-role client.
   in the chat: **planning** (think, research, ask; hand in a plan with
   `submit_plan`, shown as a plan card), **building** (write the files from the
   plan) and **checking** (browser check first, then fixes and the reply).
-  Small follow-up edits run as one step. A step that only deliberates for 75s
-  (150s when planning) is cut, its thinking kept, and the rest of the turn is
+  Small follow-up edits run as one step. A step that only deliberates for 45s
+  (90s when planning) is cut, its thinking kept, and the rest of the request is
   handed to DeepSeek V3 with that plan.
+- **Live canvas** — the moment a plan is handed in, a wireframe of it (palette,
+  sections) is drawn on the canvas (`lib/planPreview.ts`); then every
+  write_file and append_file streams onto the canvas as it's written.
 - **Visual check** (`lib/tools/visualCheck.ts`) — the agent's `check_design`
   tool renders a file in headless Chromium (`@sparticuz/chromium` on Vercel),
   runs automatic checks (JS errors, sideways overflow at desktop and phone
