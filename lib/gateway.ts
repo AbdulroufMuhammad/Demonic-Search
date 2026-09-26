@@ -88,6 +88,9 @@ export type ChatOpts = {
   signal?: AbortSignal;
   /** Don't retry on the registry's backup model (e.g. image input, which the text fallbacks can't read). */
   noFallback?: boolean;
+  /** Per-call overrides, e.g. a small token/reasoning budget for quick reviews. */
+  maxTokens?: number;
+  extra?: Record<string, unknown>;
 };
 
 export class GatewayError extends Error {
@@ -137,9 +140,10 @@ async function chatOnce(modelKey: ModelKey, opts: ChatOpts, onFirstByte: () => v
         stream: true,
         temperature: m.temperature,
         top_p: m.top_p,
-        max_tokens: m.max_tokens,
+        max_tokens: opts.maxTokens ?? m.max_tokens,
         ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
         ...m.extra,
+        ...opts.extra,
       }),
     });
     if (!res.ok || !res.body) throw new GatewayError(res.status, await res.text());

@@ -115,6 +115,45 @@ function parseReview(text: string): { issues: VisualIssue[]; overall: string } |
   }
 }
 
+const RENDER_TIMEOUT_MS = 35_000;
+const REVIEW_TIMEOUT_MS = 40_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([p, new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() => clearTimeout(timer));
+}
+
+async function render(html: string): Promise<{ automated: Automated; tiles: Buffer[] }> {
+  const browser = await launchBrowser();
+  const tiles: Buffer[] = [];
+  try {
+    const jsErrors: string[] = [];
+    const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
+    const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
+    const height = Math.min(desktop.height, TILE * MAX_TILES);
+    for (let y = 0; y < height; y += TILE) {
+      tiles.push(await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }));
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(300);
+    const mobile = (await page.evaluate("Math.max(0, document.documentElement.scrollWidth - window.innerWidth)")) as number;
+    return {
+      tiles,
+      automated: {
+        jsErrors: [...new Set(jsErrors)].slice(0, 5),
+        horizontalOverflow: { desktop: desktop.overflow, mobile },
+        brokenImages: desktop.brokenImages,
+        lowContrast: desktop.lowContrast,
+        clippedText: desktop.clippedText,
+        emptyPage: desktop.emptyPage,
+        height: desktop.height,
+      },
+    };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 /**
  * Render a design in headless Chromium, run automatic checks, and have a
  * vision model (Nemotron Omni, falling back to Muse Glimmer) review
@@ -126,36 +165,8 @@ export async function checkDesign(
   html: string,
   opts: { deadline: number; signal?: AbortSignal; request?: string }
 ): Promise<CheckResult> {
-  const browser = await launchBrowser();
-  let automated: Automated;
-  const tiles: Buffer[] = [];
-  try {
-    const jsErrors: string[] = [];
-    const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
-
-    const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
-    const height = Math.min(desktop.height, TILE * MAX_TILES);
-    for (let y = 0; y < height; y += TILE) {
-      tiles.push(
-        await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } })
-      );
-    }
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForTimeout(300);
-    const mobile = (await page.evaluate("Math.max(0, document.documentElement.scrollWidth - window.innerWidth)")) as number;
-
-    automated = {
-      jsErrors: [...new Set(jsErrors)].slice(0, 5),
-      horizontalOverflow: { desktop: desktop.overflow, mobile },
-      brokenImages: desktop.brokenImages,
-      lowContrast: desktop.lowContrast,
-      clippedText: desktop.clippedText,
-      emptyPage: desktop.emptyPage,
-      height: desktop.height,
-    };
-  } finally {
-    await browser.close().catch(() => {});
-  }
+  // Rendering is capped: a browser that can't start or a page that never settles must not stall the turn.
+  const { automated, tiles } = await withTimeout(render(html), RENDER_TIMEOUT_MS, "the page took too long to render");
 
   let screenshotUrl: string | null = null;
   if (tiles[0]) {
@@ -174,14 +185,18 @@ export async function checkDesign(
     },
     ...tiles.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
   ];
+  const reviewUntil = Math.min(opts.deadline - 5_000, Date.now() + REVIEW_TIMEOUT_MS + 5_000);
   for (const model of REVIEWERS) {
-    if (opts.deadline - Date.now() < 15_000) break;
+    if (reviewUntil - Date.now() < 8_000) break;
     try {
       const r = await chat(model, {
         messages: [{ role: "user", content }],
-        deadline: Math.min(opts.deadline - 5_000, Date.now() + 90_000),
+        deadline: Math.min(opts.deadline - 5_000, Date.now() + REVIEW_TIMEOUT_MS),
         signal: opts.signal,
         noFallback: true,
+        // A review needs a short answer, not pages of deliberation; this keeps the reasoning model fast.
+        maxTokens: 1500,
+        extra: model === "omni" ? { reasoning_budget: 768 } : undefined,
       });
       const review = parseReview(r.content) ?? parseReview(r.reasoning);
       if (review) return { automated, ...review, reviewer: model, screenshotUrl };

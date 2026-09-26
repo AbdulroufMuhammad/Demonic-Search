@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { chat, modelKeyFor, type ChatMessage, type ToolSchema } from "@/lib/gateway";
+import { chat, modelKeyFor, MODELS, type ChatMessage, type ModelKey, type ToolSchema } from "@/lib/gateway";
 import { makeEmitter, type AgentEvent, type Emit } from "@/lib/events";
 import { FILE_TOOL_SCHEMAS, makeFileTools, cleanPath } from "@/lib/tools/files";
 import { SourceRegistry, WEB_TOOL_SCHEMAS } from "@/lib/tools/tavily";
@@ -18,6 +18,8 @@ const TURN_BUDGET_MS = Number(process.env.TURN_BUDGET_MS ?? 270_000);
 const STOP_MARGIN_MS = 20_000;
 const MAX_STEPS = 30;
 const MAX_ACTIVE_FILE_CHARS = 60_000;
+// A browser check needs this much turn time left: ~35s to render, ~45s to review, plus the fix that follows.
+const CHECK_MIN_MS = 90_000;
 
 const ASK_SCHEMA: ToolSchema = {
   type: "function",
@@ -138,7 +140,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
 - If a brand-new request leaves the important choices open (audience, content, tone, format), you may call ask_questions once with 1–4 quick questions and suggested answers instead of guessing. If the request is already specific enough, just start designing. Never ask twice in a row.
-- After you create a file or make substantial visual changes, call check_design on it once, then fix the automated findings and any high/medium issues it reports (ignore low-severity nitpicks). Skip it for tiny text edits; never check the same file more than twice in a turn.
+- Every file you write is checked automatically in a real browser before your reply reaches the user, and any real problems come back to you to fix. You can also call check_design yourself mid-way. When problems come back, fix them directly; don't ask the user.
 - If the user asks you to create, extract or define a design system, make a visual spec file for it (palette with roles and hex values, type scale, spacing/radius, core components in their states) and call save_design_system so it becomes reusable.
 - When the user comments on a specific element, you get its HTML; change that element and leave the rest alone.
 - When you're done, reply in 1–3 short sentences: what you made or changed, and optionally one idea for what to refine next. Plain prose; **bold** is fine; no headings, no code. Make no tool calls after that reply.
@@ -192,7 +194,13 @@ function partialJsonString(args: string, key: string): string | null {
   return out;
 }
 
-type ProjectSettings = { designSystems?: string[]; summary?: { upTo: string; text: string }; partial?: { path: string; content: string } };
+type ProjectSettings = {
+  designSystems?: string[];
+  summary?: { upTo: string; text: string };
+  partial?: { path: string; content: string };
+  /** A file written right before a pause that still needs its browser check. */
+  pendingCheck?: string;
+};
 type HistoryMessage = { id: string; role: string; content: string; meta: any; created_at: string };
 
 const KEEP_RECENT = 12;
@@ -297,15 +305,22 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const ctrl = new AbortController();
   opts.signal?.addEventListener("abort", () => ctrl.abort());
   const signal = ctrl.signal;
+  // The model picker can change mid-run; each step uses whatever is selected now.
+  let currentModel: ModelKey = "glm";
   const stillOwner = async () => {
-    const { data: live } = await db.from("projects").select("status, run_id").eq("id", projectId).single();
+    const { data: live } = await db.from("projects").select("status, run_id, model_profile").eq("id", projectId).single();
     const ok = !!live && live.status !== "stopped" && (!opts.runId || live.run_id === opts.runId);
     if (!ok) ctrl.abort();
+    else if (live.model_profile && modelKeyFor(live.model_profile) !== currentModel) {
+      currentModel = modelKeyFor(live.model_profile);
+      await emit({ type: "note", payload: { text: `Switched to ${MODELS[currentModel].label}.` } });
+    }
     return ok;
   };
 
   const { data: project } = await db.from("projects").select("*").eq("id", projectId).single();
   if (!project) throw new Error("project not found");
+  currentModel = modelKeyFor(project.model_profile);
   await touch({ status: "running" });
 
   const settings = (project.settings ?? {}) as ProjectSettings;
@@ -361,6 +376,9 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     }
   }
   if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
+  if (settings.pendingCheck && !settings.partial) {
+    context += `\n\n"${settings.pendingCheck}" is written; it only still needs its browser check, which runs automatically once you reply. Unless something else is unfinished, just reply in one sentence.`;
+  }
   if (settings.partial) {
     const p = settings.partial;
     context += `\n\nThe time limit cut you off while you were writing "${p.path}". The first ${p.content.length} characters are saved. Don't rewrite them: call append_file with path "${p.path}" and ONLY the rest of the document, continuing exactly where this leaves off:\n\`\`\`html\n…${p.content.slice(-1500)}\n\`\`\``;
@@ -371,6 +389,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
   const touched = new Map<string, { version: number; created: boolean }>();
   const checks = new Map<string, number>();
+  // The last file written this turn that hasn't been through a browser check yet.
+  let unchecked: string | null = settings.pendingCheck ?? null;
+  let autoChecks = 0;
+  const checkDeferred = !!settings.pendingCheck;
   let badCalls = 0;
   let status: "ready" | "paused" = "ready";
   // A long generation sends no events for minutes; the heartbeat tells other tabs (and resume logic) this turn is alive.
@@ -388,6 +410,36 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     if (!writing?.path || !content || content.length < 400) return;
     settings.partial = { path: writing.path, content };
     await db.from("projects").update({ settings }).eq("id", projectId);
+  };
+
+  const requestText = () => {
+    const latest = [...recent].reverse().find((m) => m.role === "user" && !m.meta?.answers)?.content ?? "";
+    return `${project.goal ?? ""}${latest && latest !== project.goal ? `\nLatest request: ${latest}` : ""}`;
+  };
+  /** Render a file in a browser and review it; shared by the agent's own check_design calls and the automatic check. */
+  const runCheck = async (path: string) => {
+    const f = await fileTools.read_file({ path });
+    checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
+    if (unchecked === f.path) unchecked = null;
+    const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: requestText() });
+    const auto = automatedFindings(c);
+    const serious = c.issues.filter((i) => i.severity !== "low");
+    const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
+    const needsFix = auto.length > 0 || serious.length > 0;
+    return {
+      path: f.path,
+      needsFix,
+      problems: [...auto, ...visual.filter((v) => !v.startsWith("Low"))],
+      result: {
+        path: f.path,
+        version: f.version,
+        automated_findings: auto,
+        visual_issues: c.issues,
+        overall: c.overall,
+        note: needsFix ? "Fix the automated findings and the high/medium visual issues." : "Looks good; no fixes needed.",
+      },
+      summary: { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length },
+    };
   };
 
   const finish = async (reply: string | null) => {
@@ -423,7 +475,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       const stepStart = Date.now();
       let r;
       try {
-        r = await chat(modelKeyFor(project.model_profile), {
+        r = await chat(currentModel, {
           messages: convo,
           tools,
           deadline,
@@ -480,6 +532,47 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
       const text = r.content.trim();
       if (!r.toolCalls.length) {
+        // Never hand back unverified work: check the last written file in a real browser and send real problems back to the model.
+        const tooLate = deadline - Date.now() < CHECK_MIN_MS;
+        // Postpone a check to the next round at most once, so a short round can never pause forever.
+        if (unchecked && autoChecks < 2 && !(tooLate && checkDeferred)) {
+          if (tooLate) {
+            settings.pendingCheck = unchecked;
+            await db.from("projects").update({ settings }).eq("id", projectId);
+            status = "paused";
+            await emit({ type: "continue", payload: {} });
+            break;
+          }
+          autoChecks++;
+          const path = unchecked;
+          const callId = `auto-check-${step}`;
+          await emit({ type: "note", payload: { text: "Checking the result in a real browser." } });
+          await emit({ type: "tool-call", payload: { callId, name: "check_design", args: { path } } });
+          let out: Awaited<ReturnType<typeof runCheck>> | null = null;
+          try {
+            out = await runCheck(path);
+            await emit({ type: "tool-result", payload: { callId, name: "check_design", ...out.summary } });
+          } catch (e) {
+            unchecked = null;
+            await emit({ type: "tool-result", payload: { callId, name: "check_design", path, error: e instanceof Error ? e.message : String(e) } });
+          }
+          if (settings.pendingCheck) {
+            delete settings.pendingCheck;
+            await db.from("projects").update({ settings }).eq("id", projectId);
+          }
+          if (out?.needsFix) {
+            convo.push({ role: "assistant", content: r.content || "Done." });
+            convo.push({
+              role: "user",
+              content: `An automatic check of "${out.path}" in a real browser found these problems:\n${out.problems.map((p) => `- ${p}`).join("\n")}\nFix them now (str_replace for small fixes), then reply in one or two sentences. Don't ask the user; just fix it.`,
+            });
+            continue;
+          }
+        }
+        if (settings.pendingCheck) {
+          delete settings.pendingCheck;
+          await db.from("projects").update({ settings }).eq("id", projectId);
+        }
         await finish(text || (touched.size ? "Done. It's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
         break;
       }
@@ -534,6 +627,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 delete settings.partial;
                 await db.from("projects").update({ settings }).eq("id", projectId);
               }
+              unchecked = w.path;
               const prev = touched.get(w.path);
               touched.set(w.path, { version: w.version, created: prev?.created ?? w.created });
               result = { ok: true, path: w.path, version: w.version };
@@ -566,23 +660,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               break;
             }
             case "check_design": {
-              const f = await fileTools.read_file(args);
-              if ((checks.get(f.path) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
-              if (deadline - Date.now() < 45_000) throw new Error("not enough time left in this turn to run a visual check");
-              checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
-              const request = [...recent].reverse().find((m) => m.role === "user" && !m.meta?.answers)?.content ?? project.goal ?? "";
-              const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: `${project.goal ?? ""}${request && request !== project.goal ? `\nLatest request: ${request}` : ""}` });
-              const auto = automatedFindings(c);
-              const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
-              result = {
-                path: f.path,
-                version: f.version,
-                automated_findings: auto,
-                visual_issues: c.issues,
-                overall: c.overall,
-                note: auto.length || c.issues.some((i) => i.severity !== "low") ? "Fix the automated findings and the high/medium visual issues." : "Looks good; no fixes needed.",
-              };
-              summary = { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length };
+              if ((checks.get(cleanPath(args.path)) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
+              if (deadline - Date.now() < CHECK_MIN_MS) throw new Error("not enough time left in this turn to run a visual check");
+              const out = await runCheck(cleanPath(args.path));
+              result = out.result;
+              summary = out.summary;
               break;
             }
             case "save_design_system": {
