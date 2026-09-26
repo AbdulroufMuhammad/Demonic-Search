@@ -26,6 +26,7 @@ const HEARTBEAT_MS = 10_000;
 // Reasoning models otherwise deliberate for the whole turn: GLM spent 270s planning a business card.
 const THINK_LIMIT_MS = Number(process.env.THINK_LIMIT_MS ?? 75_000);
 const MAX_THINK_CUTS = 2;
+const BUILD_MODEL: ModelKey = "deepseek";
 
 class ThinkLimit extends Error {
   name = "ThinkLimit";
@@ -348,12 +349,16 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const signal = ctrl.signal;
   // The model picker can change mid-run; each step uses whatever is selected now.
   let currentModel: ModelKey = "glm";
+  // Set when a reasoning model deliberated past the thinking budget: the rest of the turn builds with a fast,
+  // non-reasoning model. Picking a model mid-run clears it.
+  let buildModel: ModelKey | null = null;
   const stillOwner = async () => {
     const { data: live } = await db.from("projects").select("status, run_id, model_profile").eq("id", projectId).single();
     const ok = !!live && live.status !== "stopped" && (!opts.runId || live.run_id === opts.runId);
     if (!ok) ctrl.abort();
     else if (live.model_profile && modelKeyFor(live.model_profile) !== currentModel) {
       currentModel = modelKeyFor(live.model_profile);
+      buildModel = null;
       await emit({ type: "note", payload: { text: `Switched to ${MODELS[currentModel].label}.` } });
     }
     return ok;
@@ -578,7 +583,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             : undefined;
         let r;
         try {
-          r = await chat(currentModel, {
+          r = await chat(buildModel ?? currentModel, {
             messages: convo,
             tools,
             deadline,
@@ -623,6 +628,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             thinkCuts++;
             const plan = stepReasoning.trim();
             await emit({ type: "thought", payload: { text: plan.length > 12000 ? "…" + plan.slice(-12000) : plan, ms: Date.now() - stepStart } });
+            // Told to act, reasoning models tend to keep deliberating, so a model that doesn't reason builds from the plan.
+            if (!buildModel && (buildModel ?? currentModel) !== BUILD_MODEL) {
+              buildModel = BUILD_MODEL;
+              await emit({ type: "note", payload: { text: `Plan's ready; handing the build to ${MODELS[BUILD_MODEL].label} so it starts writing now.` } });
+            }
             convo.push({
               role: "user",
               content: `You've planned enough; time to build. Your plan so far:\n"""\n${plan.slice(-6000)}\n"""\nAct on it now: call write_file with the design (append_file for the rest if it's long). Keep any further thinking to a few sentences; you can refine after the first version is on the canvas.`,
