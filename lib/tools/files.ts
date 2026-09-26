@@ -70,8 +70,8 @@ export function makeFileTools(db: SupabaseClient, projectId: string, transform?:
   async function str_replace({ path, old_str, new_str }: { path: string; old_str: string; new_str: string }) {
     const current = await read_file({ path });
     const at = current.content.indexOf(old_str);
-    if (!old_str || at < 0) throw new Error("old_str not found in the file — read_file it again and copy the exact text");
-    if (current.content.indexOf(old_str, at + old_str.length) >= 0) throw new Error("old_str appears more than once — include more surrounding text");
+    if (!old_str || at < 0) throw new Error("old_str not found in the file; read_file it again and copy the exact text");
+    if (current.content.indexOf(old_str, at + old_str.length) >= 0) throw new Error("old_str appears more than once; include more surrounding text");
     const content = current.content.slice(0, at) + new_str + current.content.slice(at + old_str.length);
     return write_file({ path, content });
   }

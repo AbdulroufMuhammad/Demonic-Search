@@ -31,6 +31,34 @@ function ensureDocument(html: string) {
   return root;
 }
 
+const EM_DASH = /—|&mdash;|&#8212;|&#x2014;/gi;
+
+/**
+ * Models lean on em dashes heavily; the design rules forbid them in copy, and
+ * this catches the ones that slip through: a range dash between numbers,
+ * a comma anywhere else.
+ */
+export function removeEmDashes(text: string) {
+  if (!EM_DASH.test(text)) return text;
+  EM_DASH.lastIndex = 0;
+  return text
+    .replace(/(\d)\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*(\d)/gi, "$1–$2")
+    .replace(/(^|[>\n])\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*/gi, "$1")
+    .replace(/\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*/gi, ", ");
+}
+
+function cleanCopy(node: HTMLElement) {
+  for (const child of node.childNodes) {
+    if (child instanceof HTMLElement) {
+      if (!["SCRIPT", "STYLE", "TEXTAREA", "PRE", "CODE"].includes(child.tagName)) cleanCopy(child);
+    } else if (child.nodeType === 3 && EM_DASH.test(child.rawText)) {
+      EM_DASH.lastIndex = 0;
+      (child as any).rawText = removeEmDashes(child.rawText);
+    }
+    EM_DASH.lastIndex = 0;
+  }
+}
+
 function inSvg(el: HTMLElement) {
   return !!el.closest("svg");
 }
@@ -103,6 +131,7 @@ export function finalizeArtifact(html: string, sources: Map<string, Source>): st
   if (!head.querySelector("meta[name=viewport]"))
     head.insertAdjacentHTML("beforeend", `<meta name="viewport" content="width=device-width, initial-scale=1">`);
   citations(root, sources);
+  cleanCopy(root);
   assignIds(root);
   const out = root.toString();
   return /^\s*<!doctype/i.test(out) ? out : `<!doctype html>\n${out}`;

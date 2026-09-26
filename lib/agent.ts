@@ -4,7 +4,7 @@ import { makeEmitter, type AgentEvent } from "@/lib/events";
 import { FILE_TOOL_SCHEMAS, makeFileTools, cleanPath } from "@/lib/tools/files";
 import { SourceRegistry, WEB_TOOL_SCHEMAS } from "@/lib/tools/tavily";
 import { makeRepoTools, REPO_TOOL_SCHEMAS } from "@/lib/tools/github";
-import { finalizeArtifact } from "@/lib/finalize";
+import { finalizeArtifact, removeEmDashes } from "@/lib/finalize";
 import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
 import { describeForAgent, fromRow } from "@/lib/designSystems";
@@ -122,7 +122,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - Every design is a file in this project: one complete, self-contained HTML document (inline <style> and <script>). External resources only from Google Fonts, cdn.jsdelivr.net, unpkg.com or cdnjs.cloudflare.com. No build step, no frameworks that need compiling.
 - Name files for what they are: "Landing Page.html", "Q3 Board Deck.html", "Onboarding Flow.html". Make a new file for a genuinely new artifact or variation; otherwise edit the existing one.
 - For targeted edits use str_replace with an exact, unique snippet of the current file. Use write_file to create a file or when most of it changes.
-- Keep data-el attributes on elements intact — the user's direct edits rely on them.
+- Keep data-el attributes on elements intact; the user's direct edits rely on them.
 
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
@@ -133,8 +133,9 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - When you're done, reply in 1–3 short sentences: what you made or changed, and optionally one idea for what to refine next. Plain prose; **bold** is fine; no headings, no code. Make no tool calls after that reply.
 
 ## Design quality
+- Writing style, in the design's copy and in your replies: never use em dashes (—). Use a comma, colon, period or parentheses instead. Use an en dash (–) only for number ranges like 2019–2023.
 - Commit to a clear visual direction: a deliberate type pairing (Google Fonts), a restrained palette defined as CSS custom properties on :root, one accent color used with intent, and a consistent spacing scale.
-- Strong hierarchy and real, specific content — never lorem ipsum, never "Feature 1". Invent plausible names, numbers and copy when the user didn't provide them.
+- Strong hierarchy and real, specific content: never lorem ipsum, never "Feature 1". Invent plausible names, numbers and copy when the user didn't provide them.
 - Icons are inline SVG (simple 1.5px-stroke line icons), never emoji. Images: use CSS gradients, SVG illustration or shapes rather than external stock photo URLs.
 - Layout with CSS grid/flexbox; it must look right at the canvas width and be responsive. Check contrast. Avoid generic "AI" aesthetics: no purple-blue gradients everywhere, no glassmorphism by default, no centered-everything.
 - Printable formats (documents, slides, résumés) include @page and page-break rules so browser print → PDF looks right.
@@ -142,11 +143,11 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 ## Tweaks
 Expose 2–5 meaningful live controls when they'd help the user explore (accent color, density, speed, which screen to show, a layout variant). Declare them in the file as:
 <script type="application/json" id="tweaks">[{"name":"accent","label":"Accent","type":"color","value":"#d9774f"},{"name":"speed","type":"range","min":200,"max":2000,"step":50,"value":700,"unit":"ms"},{"name":"startScreen","type":"select","options":["home","detail"],"value":"home"},{"name":"grid","type":"toggle","value":false}]</script>
-The canvas applies every value as a CSS custom property on :root (--accent, --speed with its unit, --grid as 1/0), as an attribute on <html> (data-start-screen="detail" — camelCase names become kebab-case), and fires window.addEventListener("tweak", e => e.detail.name / e.detail.value) on load and on every change. Use var(--name) in CSS or the event in JS.
+The canvas applies every value as a CSS custom property on :root (--accent, --speed with its unit, --grid as 1/0), as an attribute on <html> (data-start-screen="detail"; camelCase names become kebab-case), and fires window.addEventListener("tweak", e => e.detail.name / e.detail.value) on load and on every change. Use var(--name) in CSS or the event in JS.
 ${opts.research ? "\n## Research\nweb_search and web_fetch give you sources with IDs (S1, S2…). Cite every factual sentence as [S3] or [S3, S5] using only IDs you were given; a numbered sources list is added automatically. Never write URLs as citations.\n" : "\n## Facts\nweb_search / web_fetch are available if the request depends on real-world facts you're unsure of; cite what you use as [S3]. Most design work needs no search.\n"}
 ## This project
 Starting template: ${opts.templateBrief}
-${opts.designSystem || "No design system selected — choose a fitting visual direction yourself."}
+${opts.designSystem || "No design system selected. Choose a fitting visual direction yourself."}
 ${opts.codebase ? `\nConnected codebase: ${opts.codebase}. Before designing, use repo_tree / repo_read to study its UI code (components, global CSS, Tailwind/theme config, tokens) and match its visual language, component patterns and real product copy.` : ""}`;
 }
 
@@ -229,7 +230,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     {
       role: "system",
       content: systemPrompt({
-        templateBrief: `${template.label} — ${template.brief}`,
+        templateBrief: `${template.label}. ${template.brief}`,
         designSystem: describeForAgent(dsRes.data ? fromRow(dsRes.data) : null),
         codebase: project.codebase,
         research: template.id === "research",
@@ -251,7 +252,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     if (cur && cur.content.length <= MAX_ACTIVE_FILE_CHARS) {
       context += `\nThe user is looking at "${active.path}". Its current contents (v${cur.version}):\n\`\`\`html\n${cur.content}\n\`\`\``;
     } else if (cur) {
-      context += `\nThe user is looking at "${active.path}" (too long to include — read_file it before editing).`;
+      context += `\nThe user is looking at "${active.path}" (too long to include, so read_file it before editing).`;
     }
   }
   if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
@@ -266,6 +267,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
   const finish = async (reply: string | null) => {
     if (reply) {
+      reply = removeEmDashes(reply);
       const meta = { files: [...touched].map(([path, v]) => ({ path, ...v })) };
       const { data: message } = await db
         .from("messages")
@@ -339,10 +341,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
       const text = r.content.trim();
       if (!r.toolCalls.length) {
-        await finish(text || (touched.size ? "Done — it's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
+        await finish(text || (touched.size ? "Done. It's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
         break;
       }
-      if (text) await emit({ type: "note", payload: { text: text.slice(0, 240) } });
+      if (text) await emit({ type: "note", payload: { text: removeEmDashes(text).slice(0, 240) } });
 
       convo.push({
         role: "assistant",
@@ -362,7 +364,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           } catch {
             throw new Error(
               r.finish === "length"
-                ? "your tool call was cut off because it was too long — write a shorter file, or build it up with str_replace"
+                ? "your tool call was cut off because it was too long; write a shorter file, or build it up with str_replace"
                 : "tool arguments were not valid JSON"
             );
           }
@@ -414,19 +416,19 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             }
             case "check_design": {
               const f = await fileTools.read_file(args);
-              if ((checks.get(f.path) ?? 0) >= 2) throw new Error("already checked this file twice this turn — finish up");
+              if ((checks.get(f.path) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
               if (deadline - Date.now() < 45_000) throw new Error("not enough time left in this turn to run a visual check");
               checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
               const c = await checkDesign(db, projectId, f.content, { deadline, signal: opts.signal });
               const auto = automatedFindings(c);
-              const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where} — ` : ""}${i.problem}`);
+              const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
               result = {
                 path: f.path,
                 version: f.version,
                 automated_findings: auto,
                 visual_issues: c.issues,
                 overall: c.overall,
-                note: auto.length || c.issues.some((i) => i.severity !== "low") ? "Fix the automated findings and the high/medium visual issues." : "Looks good — no fixes needed.",
+                note: auto.length || c.issues.some((i) => i.severity !== "low") ? "Fix the automated findings and the high/medium visual issues." : "Looks good; no fixes needed.",
               };
               summary = { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length };
               break;
@@ -467,7 +469,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       await touch();
       if (asked) break;
       if (badCalls > 5) {
-        await emit({ type: "error", payload: { message: "Too many failed tool calls — stopping here." } });
+        await emit({ type: "error", payload: { message: "Too many failed tool calls, so I stopped here." } });
         break;
       }
       if (step === MAX_STEPS - 1) await finish("I hit the step limit for one turn. Say “continue” and I'll keep going.");

@@ -35,7 +35,7 @@ export class SourceRegistry {
   }
 
   private spend() {
-    if (this.searchesLeft <= 0) throw new Error("the search budget for this project is used up — continue with what you have");
+    if (this.searchesLeft <= 0) throw new Error("the search budget for this project is used up; continue with what you have");
     this.searchesLeft -= 1;
   }
 
@@ -70,7 +70,7 @@ export class SourceRegistry {
 
   async fetch({ source_id }: { source_id: string }) {
     const src = this.sources.get(source_id);
-    if (!src) throw new Error("unknown source_id — use an ID returned by web_search");
+    if (!src) throw new Error("unknown source_id; use an ID returned by web_search");
     this.spend();
     try {
       const r = await tv("/extract", { urls: [src.url] });
@@ -88,7 +88,7 @@ export const WEB_TOOL_SCHEMAS = [
     type: "function" as const,
     function: {
       name: "web_search",
-      description: "Search the web. Returns source IDs (S1, S2…), titles and snippets — cite facts as [S1].",
+      description: "Search the web. Returns source IDs (S1, S2…), titles and snippets. Cite facts as [S1].",
       parameters: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] },
     },
   },

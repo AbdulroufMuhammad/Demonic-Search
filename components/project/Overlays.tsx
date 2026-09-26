@@ -205,7 +205,7 @@ export function ShareDialog({
             <IconClose size={16} />
           </button>
         </div>
-        <p className="modal-note">There are no accounts — anyone with a link below can open this project.</p>
+        <p className="modal-note">There are no accounts, so anyone with a link below can open this project.</p>
         {links.map((l) => (
           <div key={l.key} className="share-link">
             <div>
@@ -229,7 +229,7 @@ export function ShareDialog({
             <IconDownload size={14} /> Standalone HTML
           </a>
         </div>
-        <p className="modal-foot">PDF opens your browser&rsquo;s print dialog — choose “Save as PDF”.</p>
+        <p className="modal-foot">PDF opens your browser&rsquo;s print dialog. Choose “Save as PDF”.</p>
       </div>
     </div>
   );

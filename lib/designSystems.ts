@@ -32,7 +32,7 @@ export function fromRow(row: {
 /** A design system phrased as instructions for the design agent. */
 export function describeForAgent(ds: DesignSystem | null) {
   if (!ds) return "";
-  return `Design system "${ds.name}" — use these tokens as the palette and type (define them as CSS custom properties). Colors: ${ds.colors
+  return `Design system "${ds.name}": use these tokens as the palette and type (define them as CSS custom properties). Colors: ${ds.colors
     .map((c) => `${c.name} ${c.hex}`)
     .join(", ")}. Fonts: ${ds.fonts.map((f) => `${f.role}: ${f.stack}`).join("; ")}.`;
 }

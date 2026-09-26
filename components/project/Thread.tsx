@@ -169,7 +169,7 @@ function QuestionsCard({ row, disabled, onAnswer }: { row: Extract<Row, { kind: 
       ))}
       <div className="questions-actions">
         <button type="button" className="btn-ghost" disabled={disabled} onClick={() => submit(true)}>
-          Skip — use your judgement
+          Skip, use your judgement
         </button>
         <button type="button" className="btn-accent" disabled={disabled} onClick={() => submit()}>
           Continue

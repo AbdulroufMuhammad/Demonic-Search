@@ -610,7 +610,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               <button
                 type="button"
                 className="icon-btn"
-                title="Check for issues — render it in a browser, have a vision model review it, and fix what's found"
+                title="Check for issues: render it in a browser, have a vision model review it, and fix what's found"
                 disabled={!activePath || running || viewVersion != null}
                 onClick={() => send(`Check "${activePath}" in the browser for visual issues and fix anything real you find.`)}
               >
@@ -619,7 +619,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               <button
                 type="button"
                 className={`icon-btn boxed${tweaksOpen ? " on" : ""}`}
-                title={tweaks.length ? "Tweaks" : "This design has no tweaks yet — ask the agent to add some"}
+                title={tweaks.length ? "Tweaks" : "This design has no tweaks yet. Ask the agent to add some."}
                 onClick={() => setTweaksOpen((v) => !v)}
                 disabled={!tweaks.length}
               >
