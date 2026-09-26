@@ -223,6 +223,8 @@ type ProjectSettings = {
   partial?: { path: string; content: string };
   /** A file written right before a pause that still needs its browser check. */
   pendingCheck?: string;
+  /** Reasoning cut off by the time limit before the model acted on it, handed to the next round so it doesn't start over. */
+  partialThought?: string;
   /** The design system this project made and saved to the picker, and its spec file; revisions to that file update it. */
   savedDesignSystemId?: string;
   designSystemFile?: string;
@@ -325,9 +327,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const deadline = Date.now() + TURN_BUDGET_MS;
   const emit = makeEmitter(db, projectId, opts.onEvent);
   // Writes only land while this turn still owns the project, so a stopped or superseded turn can't clobber the new one.
-  const touch = (extra: Record<string, unknown> = {}) => {
+  // Async on purpose: a Supabase query only runs once it's awaited, so a fire-and-forget heartbeat
+  // (`void touch()`) on the bare query builder would never reach the database.
+  const touch = async (extra: Record<string, unknown> = {}) => {
     const q = db.from("projects").update({ updated_at: new Date().toISOString(), ...extra }).eq("id", projectId);
-    return opts.runId ? q.eq("run_id", opts.runId) : q;
+    await (opts.runId ? q.eq("run_id", opts.runId) : q);
   };
   // Aborts on client disconnect (Stop in this tab) or when the project is stopped/claimed elsewhere.
   const ctrl = new AbortController();
@@ -424,6 +428,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         "\n\nThis is a new research request. Before any searching, call ask_questions to scope it: the form always includes how deep to go (which sets the report's length), so add 2 to 4 questions specific to this topic, such as the focus areas to cover (multi), who it's for, the time period or region, and anything to include or leave out.";
     } else if (depth) {
       context += `\n\nResearch depth: ${depth.label}. The report should print to ${depth.pages[0] === depth.pages[1] ? depth.pages[0] : `${depth.pages[0]} to ${depth.pages[1]}`} US Letter page${depth.pages[1] > 1 ? "s" : ""}: declare it with <meta name="pages" content="${depth.pages[0] === depth.pages[1] ? depth.pages[0] : `${depth.pages[0]}-${depth.pages[1]}`}"> and write enough real substance to fill it. Read about ${depth.sources} sources.`;
+    }
+    const carriedThought = settings.partialThought ?? "";
+    if (carriedThought) {
+      context += `\n\nThe time limit cut you off while you were still thinking this through, before you acted. Your reasoning so far:\n"""\n${carriedThought}\n"""\nDon't start over or re-plan: take it from there and start building now (write_file first, append_file for the rest), keeping any further thinking brief.`;
     }
     if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
     if (settings.pendingCheck && !settings.partial) {
@@ -546,6 +554,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
         const drafts = new Map<number, { path: string; sent: number; at: number }>();
         const stepStart = Date.now();
+        let stepReasoning = "";
         let r;
         try {
           r = await chat(currentModel, {
@@ -557,6 +566,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               void emit({ type: "token", payload: { t } });
             },
             onReasoning: (t) => {
+              stepReasoning += t;
               void emit({ type: "reasoning", payload: { t } });
             },
             onToolDelta: (index, name, args) => {
@@ -588,6 +598,13 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           }
           if ((e as any)?.name === "TimeoutError" && deadline - Date.now() < STOP_MARGIN_MS + 5000) {
             await savePartial();
+            // Long thinking that ran out the clock is kept (in the chat and for the next round), not thrown away.
+            const thought = stepReasoning.trim();
+            if (thought.length > 200) {
+              await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
+              settings.partialThought = `${carriedThought ? `${carriedThought}\n\n` : ""}${thought}`.slice(-8000);
+              await db.from("projects").update({ settings }).eq("id", projectId);
+            }
             status = "paused";
             await emit({ type: "continue", payload: {} });
             break;
@@ -597,6 +614,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         }
 
         writing = null;
+        if (settings.partialThought) {
+          delete settings.partialThought;
+          await db.from("projects").update({ settings }).eq("id", projectId);
+        }
         const thought = r.reasoning.trim();
         if (thought) await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
 
