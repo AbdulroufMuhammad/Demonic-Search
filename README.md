@@ -61,6 +61,15 @@ read-only file, render and export endpoints they use).
   doesn't, the tokens are read from the spec file's CSS variables and fonts
   (`lib/extractDesignSystem.ts`). Later revisions of that spec update the same
   saved system instead of adding copies.
+- **Realistic 3D** — 3D requests get a playbook (`lib/threeD.ts`): plan real
+  dimensions and a parts list with what each part attaches to; build in group
+  hierarchies with lathe, bevelled extrusions, rounded boxes, tubes between
+  real anchor points and instanced repeats; physical materials; HDRI lighting
+  from three.js's example environment maps; a camera fitted to the model; or a
+  real glTF model from a verified library (Khronos samples, three.js examples)
+  when the request matches one. Scenes expose `window.__vellum3d`, and the
+  check reports parts that float, a model cut off or tiny in the frame, and
+  photographs it from the front, side and three-quarter view for the reviewer.
 - **Split runs** — a new design (or a big request) runs as three steps, each
   its own serverless invocation with its own time budget and its own section
   in the chat: **planning** (think, research, ask; hand in a plan with

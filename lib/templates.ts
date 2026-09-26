@@ -162,7 +162,7 @@ export const TEMPLATES: Template[] = [
       ],
     },
     brief:
-      'A 3D scene with three.js loaded as an ES module via an import map from https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js (addons from .../examples/jsm/). Orbit controls, good lighting and materials, full-viewport canvas that resizes. Expose color, rotation speed and similar as tweaks.',
+      "A realistic 3D scene in three.js, product-render quality: real proportions, parts that attach, physical materials, HDRI lighting, soft shadows, a camera fitted to the model and orbit controls. Follow the Realistic 3D guide; use a real model from its library when the request matches one. Expose color, rotation speed and similar as tweaks.",
   },
   {
     id: "landing",

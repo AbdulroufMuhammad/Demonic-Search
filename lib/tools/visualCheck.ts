@@ -18,6 +18,8 @@ export type Automated = {
   height: number;
   /** For printable designs (an @page rule): how many pages it prints to, and how many it should. */
   print?: { pages: number; target: [number, number] | null };
+  /** For 3D scenes that expose window.__vellum3d: parts attached to nothing, and how the model sits in the frame. */
+  threeD?: { parts: number; floating: string[]; cutOff: boolean; tiny: boolean; hook: boolean };
 };
 
 export type VisualIssue = { where: string; problem: string; severity: "high" | "medium" | "low" };
@@ -83,6 +85,72 @@ const INSPECT_PAGE = String.raw`(() => {
     overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
     height: document.documentElement.scrollHeight,
   };
+})()`;
+
+/**
+ * Runs in the page for a three.js scene exposed as window.__vellum3d = { THREE, scene, camera, renderer }:
+ * finds groups of parts that touch neither the main model nor the ground (floating), and whether the
+ * model is cut off by, or tiny in, the frame. Also installs window.__vellumView(i), which points the
+ * camera at the model from the front (0), the side (1) or three-quarter above (2) and renders once.
+ */
+const INSPECT_3D = String.raw`(() => {
+  const v = window.__vellum3d;
+  if (!v || !v.THREE || !v.scene || !v.camera || !v.renderer) return { hook: false };
+  const T = v.THREE;
+  v.scene.updateMatrixWorld(true);
+  const parts = [], grounds = [];
+  v.scene.traverse((o) => {
+    if (!o.isMesh || !o.visible || parts.length > 400) return;
+    const box = new T.Box3().setFromObject(o);
+    if (box.isEmpty()) return;
+    const sz = box.getSize(new T.Vector3());
+    ((o.userData && o.userData.ground) || sz.y < 1e-4 ? grounds : parts).push({ o, box });
+  });
+  if (!parts.length) return { hook: true, parts: 0, floating: [], cutOff: false, tiny: false };
+  const all = new T.Box3();
+  parts.forEach((p) => all.union(p.box));
+  const center = all.getCenter(new T.Vector3());
+  const radius = Math.max(1e-3, all.getSize(new T.Vector3()).length() / 2);
+  const tol = radius * 0.02;
+  const n = parts.length, parent = parts.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const grown = parts.map((p) => p.box.clone().expandByScalar(tol));
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (grown[i].intersectsBox(parts[j].box)) parent[find(i)] = find(j);
+  const onGround = parts.map((p, i) => grounds.some((g) => grown[i].intersectsBox(g.box)) || p.box.min.y <= all.min.y + tol);
+  const groups = new Map();
+  for (let i = 0; i < n; i++) { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
+  const volume = (idx) => idx.reduce((a, i) => { const s = parts[i].box.getSize(new T.Vector3()); return a + Math.max(s.x, 1e-3) * Math.max(s.y, 1e-3) * Math.max(s.z, 1e-3); }, 0);
+  let main = null, best = -1;
+  for (const [r, idx] of groups) { const vol = volume(idx); if (vol > best) { best = vol; main = r; } }
+  const label = (o) => o.name || (o.parent && o.parent.name) || (o.geometry && o.geometry.type.replace("Geometry", "")) || "part";
+  const floating = [];
+  for (const [r, idx] of groups) {
+    if (r === main || idx.some((i) => onGround[i])) continue;
+    const c = parts[idx[0]].box.getCenter(new T.Vector3());
+    floating.push(idx.slice(0, 3).map((i) => label(parts[i].o)).join(" + ") + " at (" + [c.x, c.y, c.z].map((x) => x.toFixed(2)).join(", ") + ")");
+  }
+  const cam = v.camera;
+  cam.updateMatrixWorld(true);
+  let minX = 1, maxX = -1, minY = 1, maxY = -1, out = false;
+  for (const x of [all.min.x, all.max.x]) for (const y of [all.min.y, all.max.y]) for (const z of [all.min.z, all.max.z]) {
+    const p = new T.Vector3(x, y, z).project(cam);
+    if (p.z > 1) continue;
+    if (Math.abs(p.x) > 1.04 || Math.abs(p.y) > 1.04) out = true;
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const tiny = (maxX - minX) < 0.25 && (maxY - minY) < 0.25;
+  window.__vellumView = (i) => {
+    const dirs = [[0, 0.15, 1], [1, 0.15, 0], [0.75, 0.6, 0.75]];
+    const d = new T.Vector3(...dirs[i]).normalize();
+    const fov = ((cam.fov || 45) * Math.PI) / 180;
+    cam.position.copy(center).addScaledVector(d, (radius / Math.sin(fov / 2)) * 1.05);
+    cam.lookAt(center);
+    cam.updateProjectionMatrix();
+    v.renderer.render(v.scene, cam);
+    const r = v.renderer.domElement.getBoundingClientRect();
+    return { x: Math.max(0, r.left), y: Math.max(0, r.top), width: Math.min(r.width, innerWidth), height: Math.min(r.height, innerHeight) };
+  };
+  return { hook: true, parts: n, floating: floating.slice(0, 6), cutOff: out, tiny };
 })()`;
 
 type PageReport = {
@@ -169,7 +237,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
   return Promise.race([p, new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() => clearTimeout(timer));
 }
 
-async function render(html: string, printTarget: [number, number] | null): Promise<{ automated: Automated; tiles: Buffer[]; printTiles: Buffer[] }> {
+async function render(html: string, printTarget: [number, number] | null): Promise<{ automated: Automated; tiles: Buffer[]; printTiles: Buffer[]; views: Buffer[] }> {
   // Step timings go to the server log, so a slow check can be traced to the step that's slow.
   const t0 = Date.now();
   const laps: string[] = [];
@@ -178,6 +246,8 @@ async function render(html: string, printTarget: [number, number] | null): Promi
   lap("launch");
   const tiles: Buffer[] = [];
   const printTiles: Buffer[] = [];
+  const views: Buffer[] = [];
+  let threeD: Automated["threeD"];
   // A known page target (a résumé, a research depth) is checked even if the design forgot its @page rule.
   const printable = isPrintable(html) || !!printTarget || !!declaredPages(html);
   try {
@@ -214,6 +284,20 @@ async function render(html: string, printTarget: [number, number] | null): Promi
       if (shot) tiles.push(shot);
     }
     lap(`screenshots(${tiles.length})`);
+    // 3D scenes: inspect the model and photograph it from three angles (after the page screenshot, which keeps the design's own camera).
+    if (/<canvas|three|webgl/i.test(html)) {
+      const info = (await page.evaluate(INSPECT_3D).catch(() => null)) as (Automated["threeD"] & { hook: boolean }) | null;
+      if (info?.hook) {
+        threeD = { parts: info.parts ?? 0, floating: info.floating ?? [], cutOff: !!info.cutOff, tiny: !!info.tiny, hook: true };
+        for (let i = 0; i < 3 && threeD.parts; i++) {
+          const clip = (await page.evaluate(`window.__vellumView(${i})`).catch(() => null)) as { x: number; y: number; width: number; height: number } | null;
+          if (!clip || clip.width < 50 || clip.height < 50) break;
+          const shot = await page.screenshot({ type: "jpeg", quality: 65, timeout: 12_000, clip }).catch(() => null);
+          if (shot) views.push(shot);
+        }
+        lap(`3d(${threeD.parts} parts, ${views.length} views)`);
+      } else if (/three/i.test(html)) threeD = { parts: 0, floating: [], cutOff: false, tiny: false, hook: false };
+    }
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);
     const mobile = (await page.evaluate("Math.max(0, document.documentElement.scrollWidth - window.innerWidth)")) as number;
@@ -237,6 +321,7 @@ async function render(html: string, printTarget: [number, number] | null): Promi
     return {
       tiles,
       printTiles,
+      views,
       automated: {
         jsErrors: [...new Set(jsErrors)].slice(0, 5),
         horizontalOverflow: { desktop: desktop.overflow, mobile },
@@ -246,6 +331,7 @@ async function render(html: string, printTarget: [number, number] | null): Promi
         emptyPage: desktop.emptyPage,
         height: desktop.height,
         print,
+        threeD,
       },
     };
   } finally {
@@ -268,7 +354,7 @@ export async function checkDesign(
   // Rendering is capped: a browser that can't start or a page that never settles must not stall the turn.
   // The check step has its own invocation, so it can allow heavy pages (software WebGL) more time.
   const renderCap = Math.min(opts.renderTimeoutMs ?? RENDER_TIMEOUT_MS, Math.max(10_000, opts.deadline - Date.now() - 25_000));
-  const { automated, tiles, printTiles } = await withTimeout(render(html, opts.printPages ?? null), renderCap, "the page took too long to render");
+  const { automated, tiles, printTiles, views } = await withTimeout(render(html, opts.printPages ?? null), renderCap, "the page took too long to render");
 
   let screenshotUrl: string | null = null;
   if (tiles[0]) {
@@ -293,6 +379,15 @@ export async function checkDesign(
             text: `The next ${printTiles.length === 1 ? "image is" : `${printTiles.length} images are`} the same design as printed on paper${automated.print ? ` (it prints to ${automated.print.pages} page${automated.print.pages === 1 ? "" : "s"})` : ""}. Check the printed layout too: it should keep the designed layout (columns, sidebar), with nothing cut off, overlapping or pushed onto an extra page.`,
           },
           ...printTiles.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
+        ]
+      : []),
+    ...(views.length
+      ? [
+          {
+            type: "text" as const,
+            text: `The next ${views.length} images show the 3D model on its own from the front, the side and three-quarter above. Judge it like a 3D artist against the real object: does the silhouette read as the real thing, are the proportions right, is any defining part missing, does anything float, stick through or sit in the wrong place, and do the materials look real (not plastic or flat)? Wrong silhouette, missing defining parts and floating parts are HIGH severity.`,
+          },
+          ...views.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
         ]
       : []),
   ];
