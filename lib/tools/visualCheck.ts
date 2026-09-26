@@ -178,10 +178,19 @@ async function render(html: string, printTarget: [number, number] | null): Promi
   try {
     const jsErrors: string[] = [];
     const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
+    // Canvas and WebGL scenes: give them a moment to draw, then stop their animation loops. Software WebGL on the
+    // server runs at a few frames a second, and an endless render loop starves the screenshots until they time out.
+    if (/<canvas|three|webgl|requestAnimationFrame/i.test(html)) {
+      await page.waitForTimeout(2500);
+      await page.evaluate("window.requestAnimationFrame = () => 0").catch(() => {});
+      await page.waitForTimeout(300);
+    }
     const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
     const height = Math.min(desktop.height, TILE * (printable ? 2 : MAX_TILES));
     for (let y = 0; y < height; y += TILE) {
-      tiles.push(await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }));
+      const shot = await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, timeout: 12_000, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }).catch(() => null);
+      if (!shot) break;
+      tiles.push(shot);
     }
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);

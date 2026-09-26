@@ -10,7 +10,7 @@ import { getTemplate } from "@/lib/templates";
 import { extractDesignSystem } from "@/lib/extractDesignSystem";
 import { ASK_PARAMETERS, cleanQuestions } from "@/lib/questions";
 import { DEFAULT_DEPTH, depthFrom, withDepthQuestion } from "@/lib/research";
-import { planPreviewHtml } from "@/lib/planPreview";
+import { planPreviewHtml, planningPlaceholderHtml } from "@/lib/planPreview";
 import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
 import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -74,7 +74,7 @@ const PLAN_SCHEMA: ToolSchema = {
 type Plan = { title: string; summary: string; direction: string; sections: { name: string; detail: string }[]; files: string[]; notes: string };
 
 function cleanPlan(a: any): Plan {
-  const str = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n);
+  const str = (v: unknown, n: number) => removeEmDashes(String(v ?? "").trim()).slice(0, n);
   return {
     title: str(a?.title, 120) || "Plan",
     summary: str(a?.summary, 600),
@@ -492,6 +492,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           ? [...FILE_TOOL_SCHEMAS, ...baseTools, APPEND_SCHEMA, SAVE_DS_SCHEMA]
           : [...FILE_TOOL_SCHEMAS, ...baseTools, APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
     if (phaseFresh && phase) await emit({ type: "phase", payload: { name: phase } });
+    // The canvas shows something from the first second: the request and a skeleton while planning, then the plan's wireframe.
+    if (phaseFresh && phase === "plan" && !files.length) {
+      await emit({ type: "draft", payload: { path: cleanPath(project.title ?? "Design"), append: planningPlaceholderHtml(String(newest?.content ?? project.title ?? ""), template.label), reset: true } });
+    }
     await db.from("projects").update({ settings }).eq("id", projectId);
 
     const all = (history ?? []).reverse();
@@ -715,11 +719,13 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         const onTurnAbort = () => stepCtrl.abort(signal.reason);
         signal.addEventListener("abort", onTurnAbort);
         let acted = false;
+        // Re-checked every second once past the limit: slow thinkers may not have written much yet when it's first reached.
+        const thinkLimit = THINK_LIMIT_MS * (phase === "plan" ? 4 / 3 : 1);
         const thinkTimer =
           thinkCuts < MAX_THINK_CUTS
-            ? setTimeout(() => {
-                if (!acted && stepReasoning.length > 200) stepCtrl.abort(new ThinkLimit("thought too long without acting"));
-              }, THINK_LIMIT_MS * (phase === "plan" ? 2 : 1))
+            ? setInterval(() => {
+                if (!acted && Date.now() - stepStart > thinkLimit && stepReasoning.length > 200) stepCtrl.abort(new ThinkLimit("thought too long without acting"));
+              }, 1000)
             : undefined;
         let r;
         try {
@@ -825,7 +831,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           await emit({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
           break;
         } finally {
-          clearTimeout(thinkTimer);
+          clearInterval(thinkTimer);
           signal.removeEventListener("abort", onTurnAbort);
         }
 
