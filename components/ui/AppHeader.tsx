@@ -4,7 +4,7 @@ export default function AppHeader({ children }: { children?: React.ReactNode }) 
   return (
     <header className="app-header">
       <Link href="/" className="brand">
-        <span className="brand-name">Demonic Search</span>
+        <span className="brand-name">Vellum</span>
         <span className="brand-beta">Beta</span>
       </Link>
       <div className="app-header-right">

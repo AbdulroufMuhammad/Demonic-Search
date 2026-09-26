@@ -1,7 +1,7 @@
 const API = "https://api.github.com";
 
 function headers() {
-  const h: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "demonic-search" };
+  const h: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "vellum" };
   if (process.env.GITHUB_TOKEN) h.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   return h;
 }

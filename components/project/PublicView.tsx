@@ -15,7 +15,7 @@ export default function PublicView({ projectId, title, files, path, html }: { pr
     <div className="public">
       <header className="public-bar">
         <Link href="/" className="brand small">
-          <span className="brand-name">Demonic Search</span>
+          <span className="brand-name">Vellum</span>
         </Link>
         <span className="public-title">{title}</span>
         {files.length > 1 && (

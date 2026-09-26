@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Demonic Search",
+  title: "Vellum",
   description: "Describe it, and a design agent builds it live on a canvas.",
 };
 

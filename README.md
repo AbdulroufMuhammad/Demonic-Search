@@ -1,10 +1,13 @@
-# Demonic Search
+# Vellum
 
 A Claude Design–style design tool on open models. Describe what you want,
 pick a template and design system, and a design agent builds it live on a
 canvas — then you iterate by chatting, commenting on elements, editing text
-and type directly, or sliding the design's own tweak controls. Exports to PDF
-(via the browser's print dialog) or standalone HTML.
+and type directly, or sliding the design's own tweak controls. Exports to PDF,
+PNG, PowerPoint or standalone HTML.
+
+(Formerly "Demonic Search"; the repository, Vercel project and Supabase
+project keep that name.)
 
 It runs on OpenAI-compatible chat-completions endpoints (NVIDIA NIM /
 DeepSeek) over raw HTTP — no vendor SDK — with **Supabase** for projects,

@@ -140,7 +140,7 @@ async function saveDesignSystem(db: SupabaseClient, projectId: string, settings:
 }
 
 function systemPrompt(opts: { templateBrief: string; designSystem: string; codebase: string | null; research: boolean; researchSources: number }) {
-  return `You are the design agent in Demonic Search, a design tool where people describe what they want and you make it on a live canvas. You work like a senior product designer who writes production-quality HTML, CSS and JavaScript.
+  return `You are the design agent in Vellum, a design tool where people describe what they want and you make it on a live canvas. You work like a senior product designer who writes production-quality HTML, CSS and JavaScript.
 
 ## Files
 - Every design is a file in this project: one complete, self-contained HTML document (inline <style> and <script>). External resources only from Google Fonts, cdn.jsdelivr.net, unpkg.com or cdnjs.cloudflare.com. No build step, no frameworks that need compiling.
