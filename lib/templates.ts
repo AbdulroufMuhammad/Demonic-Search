@@ -78,7 +78,7 @@ export const TEMPLATES: Template[] = [
       ],
     },
     brief:
-      'A printable document. Use US Letter pages (<div class="page"> at 8.5in × 11in with real margins) shown as paper sheets with a soft shadow on a neutral background, plus @page rules so each .page prints as one sheet. Editorial typography: a clear type scale, measured line length, running header/footer where it helps.',
+      'A printable document. Use US Letter pages (<div class="page"> at 8.5in × 11in with real margins) shown as paper sheets with a soft shadow on a neutral background, plus @page rules so each .page prints as one sheet, and declare the page count with <meta name="pages" content="N">. Editorial typography: a clear type scale, measured line length, running header/footer where it helps.',
   },
   {
     id: "wireframe",
@@ -145,7 +145,7 @@ export const TEMPLATES: Template[] = [
       ],
     },
     brief:
-      "A one-page résumé on a US Letter sheet, printable (@page rules), with clean semantic structure (name, contact, summary, experience, skills, education). Refined typography, restrained accent color, no photos or skill bars.",
+      'A one-page résumé that must print on exactly one US Letter page: <meta name="pages" content="1">, @page { size: Letter; margin: 0.5in }, and on screen a paper sheet 8.5in wide on a neutral backdrop. Clean semantic structure (name, contact, summary, experience, skills, education). A two-column layout stays two columns in print. If it runs long, tighten spacing and type or cut wording until it fits on one page; never spill onto a second page. Refined typography, restrained accent color, no photos or skill bars.',
   },
   {
     id: "3d",
@@ -205,6 +205,7 @@ export const TEMPLATES: Template[] = [
       lead: "Research ",
       subject: "how remote work has changed demand for city-center offices since 2020",
       steps: [
+        "Ask me how deep to go (a quick overview, a standard report or a deep dive) and what to focus on.",
         "Break the question into 3 to 5 sub-questions.",
         "Search the web and read the most credible sources for each one.",
         "Lead with the answer, then the evidence, citing a source for every fact.",
@@ -213,7 +214,7 @@ export const TEMPLATES: Template[] = [
       ],
     },
     brief:
-      "A cited research report. Use web_search and web_fetch to gather real facts first. Every factual sentence ends with its source ID in brackets like [S3] or [S3, S5]; a numbered sources list is appended automatically, so don't write one. Lead with the answer, then the evidence; use tables or charts only where there are real numbers.",
+      'A cited research report laid out for print: US Letter pages with @page rules, a title block, a summary that leads with the answer, then sections with the evidence. Its length follows the depth the user picks when you scope the research first; declare it with <meta name="pages" content="3-5">. Use web_search and web_fetch to gather real facts. Every factual sentence ends with its source ID in brackets like [S3] or [S3, S5]; a numbered sources list is appended automatically, so don\'t write one. Use tables or charts only where there are real numbers.',
   },
   {
     id: "email",

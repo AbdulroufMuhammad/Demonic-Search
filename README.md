@@ -45,7 +45,12 @@ its URL, and the app talks to Supabase through the service-role client.
   tool renders a file in headless Chromium (`@sparticuz/chromium` on Vercel),
   runs automatic checks (JS errors, sideways overflow at desktop and phone
   widths, broken images, low-contrast and clipped text), and sends screenshots
-  to a vision model (Nemotron Omni, falling back to Muse Glimmer). The agent
+  to a vision model (Nemotron Omni, falling back to Muse Glimmer). Printable
+  designs (an `@page` rule, `<meta name="pages" content="1">`, a résumé, or a
+  research report with a chosen depth) are also printed to PDF: the real page
+  count is checked against the target and the printed pages go to the
+  reviewer. Width-only media queries in printable designs are limited to
+  screens (`lib/finalize.ts`), so a Letter page doesn't get the phone layout. The agent
   fixes what's found; the chat shows the screenshot and findings, and the
   canvas toolbar has a Check button to run it on demand.
 - **Attachments** — images (downscaled in the browser, stored in Storage) are
@@ -55,8 +60,13 @@ its URL, and the app talks to Supabase through the service-role client.
   straight into the composer, or dictate with the mic button.
 - **Comments** — each comment stays pinned to its element (numbered pins in
   Comment mode) with the agent's reply, until you resolve it.
+- **Research depth** — a research project is scoped first with a form that
+  always asks how deep to go (quick overview, standard report or deep dive,
+  `lib/research.ts`); the choice sets the sources read per turn and the
+  report's printed page count.
 - **Present & export** — Present slides shows one slide at a time full screen
-  with speaker notes; Share exports PDF (print), PNG, PowerPoint and HTML, and
+  with speaker notes; Share exports PDF (printed on the server by Chromium,
+  like the check), PNG, PowerPoint and HTML, and
   copies a Claude Code handoff prompt. PowerPoint (`lib/pptxExport.ts`) keeps
   each slide's look as a background image with real, editable text boxes on
   top (fonts, sizes, colors, bold/italic, bullets, speaker notes); "exact look"

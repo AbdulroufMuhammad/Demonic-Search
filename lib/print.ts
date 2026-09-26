@@ -13,3 +13,25 @@ export function printHtml(html: string) {
   document.body.appendChild(frame);
   setTimeout(() => frame.remove(), 5 * 60_000);
 }
+
+/**
+ * Download a design as a PDF printed on the server by the same Chromium the
+ * automatic check uses, so the file matches the page count the agent verified
+ * (and has no browser headers or footers). Falls back to the print dialog.
+ */
+export async function downloadPdf(projectId: string, path: string, fallbackHtml?: string | null): Promise<void> {
+  try {
+    const res = await fetch(`/api/projects/${projectId}/export?format=pdf&path=${encodeURIComponent(path)}`);
+    if (!res.ok) throw new Error(String(res.status));
+    const url = URL.createObjectURL(await res.blob());
+    Object.assign(document.createElement("a"), { href: url, download: `${path.replace(/\.html$/i, "")}.pdf` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch {
+    let html = fallbackHtml;
+    if (!html) {
+      const res = await fetch(`/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`);
+      if (res.ok) html = (await res.json()).content;
+    }
+    if (html) printHtml(html);
+  }
+}

@@ -9,6 +9,7 @@ import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
 import { extractDesignSystem } from "@/lib/extractDesignSystem";
 import { ASK_PARAMETERS, cleanQuestions } from "@/lib/questions";
+import { DEFAULT_DEPTH, depthFrom, withDepthQuestion } from "@/lib/research";
 import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
 import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -66,6 +67,15 @@ function automatedFindings(c: CheckResult): string[] {
   if (a.brokenImages) out.push(`${a.brokenImages} image${a.brokenImages > 1 ? "s" : ""} failed to load.`);
   for (const l of a.lowContrast) out.push(`Low contrast ${l.ratio}:1 on “${l.text}” (${l.fg} on ${l.bg}).`);
   for (const t of a.clippedText) out.push(`Text is clipped: “${t}”.`);
+  const p = a.print;
+  if (p?.target && (p.pages < p.target[0] || p.pages > p.target[1])) {
+    const want = p.target[0] === p.target[1] ? `exactly ${p.target[0]} page${p.target[0] > 1 ? "s" : ""}` : `${p.target[0]} to ${p.target[1]} pages`;
+    out.push(
+      p.pages > p.target[1]
+        ? `Printed, it runs to ${p.pages} pages but must be ${want}. Make it fit while keeping the designed layout: tighten spacing, line height and type sizes a little, trim wording, and check the @page margins and print styles.`
+        : `Printed, it's only ${p.pages} page${p.pages > 1 ? "s" : ""} but should be ${want}. Add real depth (more evidence, analysis, examples) rather than padding.`
+    );
+  }
   return out;
 }
 
@@ -129,7 +139,7 @@ async function saveDesignSystem(db: SupabaseClient, projectId: string, settings:
   return fromRow(data);
 }
 
-function systemPrompt(opts: { templateBrief: string; designSystem: string; codebase: string | null; research: boolean }) {
+function systemPrompt(opts: { templateBrief: string; designSystem: string; codebase: string | null; research: boolean; researchSources: number }) {
   return `You are the design agent in Demonic Search, a design tool where people describe what they want and you make it on a live canvas. You work like a senior product designer who writes production-quality HTML, CSS and JavaScript.
 
 ## Files
@@ -138,6 +148,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - For targeted edits use str_replace with an exact, unique snippet of the current file. Use write_file to create a file or when most of it changes.
 - Each reply can only hold so much. For a large file, write_file the head, styles and first sections, then append_file the rest in one or two more calls, rather than one giant write_file.
 - Keep data-el attributes on elements intact; the user's direct edits rely on them.
+- Printable documents (résumés, one-pagers, reports, letters) are designed as paper. Set an @page rule with the size and margins, declare the intended page count with <meta name="pages" content="1"> (or a range like "3-5"), and make it print to exactly that. The printed layout must match the screen layout (same columns and sidebar): keep phone-only rules for screens with @media screen and (max-width: …), and use break-inside: avoid on entries (and break-after: avoid on headings) so nothing splits awkwardly. The automatic check prints the file and tells you the real page count; if it's over, tighten spacing and type or trim wording, never let it spill onto an extra page.
 
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
@@ -160,7 +171,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 Expose 2–5 meaningful live controls when they'd help the user explore (accent color, density, speed, which screen to show, a layout variant). Declare them in the file as:
 <script type="application/json" id="tweaks">[{"name":"accent","label":"Accent","type":"color","value":"#d9774f"},{"name":"speed","type":"range","min":200,"max":2000,"step":50,"value":700,"unit":"ms"},{"name":"startScreen","type":"select","options":["home","detail"],"value":"home"},{"name":"grid","type":"toggle","value":false}]</script>
 The canvas applies every value as a CSS custom property on :root (--accent, --speed with its unit, --grid as 1/0), as an attribute on <html> (data-start-screen="detail"; camelCase names become kebab-case), and fires window.addEventListener("tweak", e => e.detail.name / e.detail.value) on load and on every change. Use var(--name) in CSS or the event in JS.
-${opts.research ? "\n## Research\nDo one focused round: a few targeted searches, then web_fetch the 2 to 4 best sources, then write. Don't keep searching once you can answer. Cite every factual sentence as [S3] or [S3, S5] using only IDs you were given; a numbered sources list is added automatically. Never write URLs as citations. Each turn has a research allowance of 14 searches and fetches.\n" : "\n## Facts\nDraft first. Write the design straight away from what you know; use web_search / web_fetch only for a specific real-world fact you'd otherwise get wrong, and cite it as [S3]. Most design work needs no search at all, and each turn allows at most 6 searches and fetches.\n"}
+${opts.research ? `\n## Research\nSearch with targeted queries, web_fetch the best sources, then write; stop searching once you can answer at the depth the user chose. Cite every factual sentence as [S3] or [S3, S5] using only IDs you were given; a numbered sources list is added automatically. Never write URLs as citations. This turn's research allowance is ${opts.researchSources} searches and fetches.\n` : "\n## Facts\nDraft first. Write the design straight away from what you know; use web_search / web_fetch only for a specific real-world fact you'd otherwise get wrong, and cite it as [S3]. Most design work needs no search at all, and each turn allows at most 6 searches and fetches.\n"}
 ## This project
 Starting template: ${opts.templateBrief}
 ${opts.designSystem || "No design system selected. Choose a fitting visual direction yourself."}
@@ -358,7 +369,14 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     ]);
 
     const template = getTemplate(project.template);
-    sources.turnLimit = template.id === "research" ? 14 : 6;
+    // Research is scoped first: the depth the user picks sets the sources read and the report's printed length.
+    const userTexts = (history ?? []).filter((m) => m.role === "user").map((m) => String(m.content ?? ""));
+    const answeredForm = (history ?? []).some((m) => m.role === "user" && m.meta?.answers);
+    const depth = template.id === "research" ? depthFrom(userTexts) ?? (answeredForm ? DEFAULT_DEPTH : null) : null;
+    const mustScope = template.id === "research" && !depth && !answeredForm;
+    sources.turnLimit = template.id === "research" ? (depth ?? DEFAULT_DEPTH).sources : 6;
+    // The printed page count the automatic check holds the design to (a file can also declare its own with <meta name="pages">).
+    const printPages: [number, number] | null = template.id === "resume" ? [1, 1] : depth ? depth.pages : null;
     const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
     const repo = project.codebase ? makeRepoTools(project.codebase) : null;
     const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
@@ -379,6 +397,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             designSystem: describeSystems(systems),
             codebase: project.codebase,
             research: template.id === "research",
+            researchSources: sources.turnLimit,
           }) + (summary ? `\n\n## Earlier in this conversation (summarized)\n${summary}` : ""),
       },
     ];
@@ -399,6 +418,12 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       } else if (cur) {
         context += `\nThe user is looking at "${active.path}" (too long to include, so read_file it before editing).`;
       }
+    }
+    if (mustScope) {
+      context +=
+        "\n\nThis is a new research request. Before any searching, call ask_questions to scope it: the form always includes how deep to go (which sets the report's length), so add 2 to 4 questions specific to this topic, such as the focus areas to cover (multi), who it's for, the time period or region, and anything to include or leave out.";
+    } else if (depth) {
+      context += `\n\nResearch depth: ${depth.label}. The report should print to ${depth.pages[0] === depth.pages[1] ? depth.pages[0] : `${depth.pages[0]} to ${depth.pages[1]}`} US Letter page${depth.pages[1] > 1 ? "s" : ""}: declare it with <meta name="pages" content="${depth.pages[0] === depth.pages[1] ? depth.pages[0] : `${depth.pages[0]}-${depth.pages[1]}`}"> and write enough real substance to fill it. Read about ${depth.sources} sources.`;
     }
     if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
     if (settings.pendingCheck && !settings.partial) {
@@ -469,7 +494,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       const f = await fileTools.read_file({ path });
       checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
       if (unchecked === f.path) unchecked = null;
-      const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: requestText() });
+      const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: requestText(), printPages });
       const auto = automatedFindings(c);
       const serious = c.issues.filter((i) => i.severity !== "low");
       const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
@@ -715,12 +740,14 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 break;
               }
               case "web_search": {
+                if (mustScope) throw new Error("scope the research first: call ask_questions (depth, focus areas, audience) and wait for the answers");
                 const hits = await sources.search(args);
                 result = hits;
                 summary = { query: args.query, results: hits.map((h) => ({ id: h.id, title: h.title, url: sources.sources.get(h.id)?.url })) };
                 break;
               }
               case "web_fetch": {
+                if (mustScope) throw new Error("scope the research first: call ask_questions (depth, focus areas, audience) and wait for the answers");
                 const f = await sources.fetch(args);
                 result = f;
                 summary = { source: { id: f.id, title: f.title, url: sources.sources.get(f.id)?.url } };
@@ -750,7 +777,8 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
                 break;
               }
               case "ask_questions": {
-                const questions = cleanQuestions(args.questions);
+                const cleaned = cleanQuestions(args.questions);
+                const questions = template.id === "research" ? withDepthQuestion(cleaned) : cleaned;
                 if (!questions.length) throw new Error("no questions given");
                 await emit({ type: "questions", payload: { intro: String(args.intro ?? "").slice(0, 300), questions } });
                 result = { ok: true, note: "The user will answer in their next message." };

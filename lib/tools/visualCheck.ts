@@ -16,6 +16,8 @@ export type Automated = {
   clippedText: string[];
   emptyPage: boolean;
   height: number;
+  /** For printable designs (an @page rule): how many pages it prints to, and how many it should. */
+  print?: { pages: number; target: [number, number] | null };
 };
 
 export type VisualIssue = { where: string; problem: string; severity: "high" | "medium" | "low" };
@@ -115,6 +117,50 @@ function parseReview(text: string): { issues: VisualIssue[]; overall: string } |
   }
 }
 
+// ---------- printing ----------
+
+const PAGE_SIZES: Record<string, [number, number]> = { letter: [8.5, 11], legal: [8.5, 14], a4: [8.27, 11.69], a5: [5.83, 8.27], a3: [11.69, 16.54], tabloid: [11, 17] };
+
+/** A CSS length in inches (in, cm, mm, pt, px; bare numbers are px). */
+function inches(v: string): number | null {
+  const m = /^(-?[\d.]+)(in|cm|mm|pt|px|pc)?$/i.exec(v.trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  return { in: n, cm: n / 2.54, mm: n / 25.4, pt: n / 72, pc: n / 6, px: n / 96 }[(m[2] ?? "px").toLowerCase() as "in"] ?? null;
+}
+
+/** Printable width and height of a page in CSS px, from the design's first @page rule (Letter with ~0.4in margins by default). */
+function printArea(html: string): { width: number; height: number } {
+  const rule = /@page\s*(?::\w+\s*)?\{([^}]*)\}/i.exec(html)?.[1] ?? "";
+  let [w, h] = PAGE_SIZES.letter;
+  const size = /(?:^|;)\s*size\s*:\s*([^;]+)/i.exec(rule)?.[1]?.trim().toLowerCase();
+  if (size) {
+    const named = size.split(/\s+/).find((t) => PAGE_SIZES[t]);
+    const dims = size.split(/\s+/).map(inches).filter((x): x is number => x != null);
+    if (named) [w, h] = PAGE_SIZES[named];
+    else if (dims.length) [w, h] = [dims[0], dims[1] ?? dims[0]];
+    if (/landscape/.test(size)) [w, h] = [Math.max(w, h), Math.min(w, h)];
+  }
+  const margin = /(?:^|;)\s*margin\s*:\s*([^;]+)/i.exec(rule)?.[1];
+  const m = (margin ? margin.trim().split(/\s+/).map(inches) : []).map((x) => x ?? 0.4);
+  const [top, right, bottom, left] = m.length === 1 ? [m[0], m[0], m[0], m[0]] : m.length === 2 ? [m[0], m[1], m[0], m[1]] : m.length === 3 ? [m[0], m[1], m[2], m[1]] : m.length === 4 ? m : [0.4, 0.4, 0.4, 0.4];
+  return { width: Math.round((w - left - right) * 96), height: Math.round((h - top - bottom) * 96) };
+}
+
+/** The page count a design declares with <meta name="pages" content="1"> or "3-5". */
+export function declaredPages(html: string): [number, number] | null {
+  const tag = /<meta[^>]+name=["']pages["'][^>]*>/i.exec(html)?.[0];
+  const m = tag && /content=["']\s*(\d+)\s*(?:[-–]\s*(\d+))?/i.exec(tag);
+  if (!m) return null;
+  const lo = Number(m[1]);
+  return [lo, Math.max(lo, Number(m[2] ?? lo))];
+}
+
+export const isPrintable = (html: string) => /@page\b/i.test(html);
+
+// Chromium writes each page as its own "/Type /Page" object.
+const countPdfPages = (pdf: Buffer) => (pdf.toString("latin1").match(/\/Type\s*\/Page(?![s\w])/g) ?? []).length;
+
 const RENDER_TIMEOUT_MS = 35_000;
 const REVIEW_TIMEOUT_MS = 40_000;
 
@@ -123,22 +169,42 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
   return Promise.race([p, new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() => clearTimeout(timer));
 }
 
-async function render(html: string): Promise<{ automated: Automated; tiles: Buffer[] }> {
+async function render(html: string, printTarget: [number, number] | null): Promise<{ automated: Automated; tiles: Buffer[]; printTiles: Buffer[] }> {
   const browser = await launchBrowser();
   const tiles: Buffer[] = [];
+  const printTiles: Buffer[] = [];
+  // A known page target (a résumé, a research depth) is checked even if the design forgot its @page rule.
+  const printable = isPrintable(html) || !!printTarget || !!declaredPages(html);
   try {
     const jsErrors: string[] = [];
     const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
     const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
-    const height = Math.min(desktop.height, TILE * MAX_TILES);
+    const height = Math.min(desktop.height, TILE * (printable ? 2 : MAX_TILES));
     for (let y = 0; y < height; y += TILE) {
       tiles.push(await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }));
     }
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);
     const mobile = (await page.evaluate("Math.max(0, document.documentElement.scrollWidth - window.innerWidth)")) as number;
+
+    // Print it for real: the page count, plus pictures of the printed layout for the reviewer.
+    let print: Automated["print"];
+    if (printable) {
+      await page.setViewportSize({ width: WIDTH, height: 800 });
+      const pdf = await page.pdf({ preferCSSPageSize: true, printBackground: true, format: "Letter" });
+      print = { pages: countPdfPages(pdf), target: declaredPages(html) ?? printTarget };
+      const area = printArea(html);
+      await page.emulateMedia({ media: "print" });
+      await page.setViewportSize({ width: area.width, height: area.height });
+      await page.waitForTimeout(200);
+      const full = (await page.evaluate("document.documentElement.scrollHeight")) as number;
+      for (let y = 0; y < Math.min(full, area.height * 2); y += area.height) {
+        printTiles.push(await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, clip: { x: 0, y, width: area.width, height: Math.min(area.height, full - y) } }));
+      }
+    }
     return {
       tiles,
+      printTiles,
       automated: {
         jsErrors: [...new Set(jsErrors)].slice(0, 5),
         horizontalOverflow: { desktop: desktop.overflow, mobile },
@@ -147,6 +213,7 @@ async function render(html: string): Promise<{ automated: Automated; tiles: Buff
         clippedText: desktop.clippedText,
         emptyPage: desktop.emptyPage,
         height: desktop.height,
+        print,
       },
     };
   } finally {
@@ -163,10 +230,10 @@ export async function checkDesign(
   db: SupabaseClient,
   projectId: string,
   html: string,
-  opts: { deadline: number; signal?: AbortSignal; request?: string }
+  opts: { deadline: number; signal?: AbortSignal; request?: string; printPages?: [number, number] | null }
 ): Promise<CheckResult> {
   // Rendering is capped: a browser that can't start or a page that never settles must not stall the turn.
-  const { automated, tiles } = await withTimeout(render(html), RENDER_TIMEOUT_MS, "the page took too long to render");
+  const { automated, tiles, printTiles } = await withTimeout(render(html, opts.printPages ?? null), RENDER_TIMEOUT_MS, "the page took too long to render");
 
   let screenshotUrl: string | null = null;
   if (tiles[0]) {
@@ -184,6 +251,15 @@ export async function checkDesign(
           : "") + REVIEW_PROMPT,
     },
     ...tiles.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
+    ...(printTiles.length
+      ? [
+          {
+            type: "text" as const,
+            text: `The next ${printTiles.length === 1 ? "image is" : `${printTiles.length} images are`} the same design as printed on paper${automated.print ? ` (it prints to ${automated.print.pages} page${automated.print.pages === 1 ? "" : "s"})` : ""}. Check the printed layout too: it should keep the designed layout (columns, sidebar), with nothing cut off, overlapping or pushed onto an extra page.`,
+          },
+          ...printTiles.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
+        ]
+      : []),
   ];
   const reviewUntil = Math.min(opts.deadline - 5_000, Date.now() + REVIEW_TIMEOUT_MS + 5_000);
   for (const model of REVIEWERS) {

@@ -264,7 +264,7 @@ export function ShareDialog({
   }
 
   /** PNG/PPTX render server-side and can take a few seconds, so show progress and surface errors. */
-  async function download(format: "png" | "pptx", mode?: "image") {
+  async function download(format: "pdf" | "png" | "pptx", mode?: "image") {
     if (!path) return;
     setBusy(mode ? `${format}-${mode}` : format);
     setError(null);
@@ -276,7 +276,9 @@ export function ShareDialog({
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // The browser's print dialog still makes a PDF if the server can't.
+      if (format === "pdf") onPrint();
+      else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -316,8 +318,8 @@ export function ShareDialog({
         ))}
         <div className="modal-section">Export {path ? `“${path.replace(/\.html$/i, "")}”` : ""}</div>
         <div className="export-row">
-          <button type="button" className="btn-secondary" disabled={!path} onClick={onPrint}>
-            <IconDownload size={14} /> PDF
+          <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("pdf")}>
+            {busy === "pdf" ? <span className="spinner" /> : <IconDownload size={14} />} PDF
           </button>
           <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("png")}>
             {busy === "png" ? <span className="spinner" /> : <IconDownload size={14} />} PNG

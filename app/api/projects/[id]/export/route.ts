@@ -12,10 +12,10 @@ function attachment(name: string, ext: string) {
 }
 
 /**
- * Downloads: standalone HTML; PNG (full-page render); PPTX for slide decks
+ * Downloads: standalone HTML; PDF printed by Chromium (the same printing the
+ * automatic check measures pages with); PNG (full-page render); PPTX for slide decks
  * with speaker notes, editable text by default or one image per slide with
- * mode=image (lib/pptxExport.ts). PDF export happens
- * in the browser's print dialog instead (lib/print.ts).
+ * mode=image (lib/pptxExport.ts).
  */
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   const res = await getProject(params.id);
@@ -30,10 +30,16 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       headers: { "Content-Type": "text/html; charset=utf-8", "Content-Disposition": attachment(file.path, "html") },
     });
   }
-  if (format !== "png" && format !== "pptx") return Response.json({ error: "format must be html, png or pptx" }, { status: 400 });
+  if (format !== "png" && format !== "pptx" && format !== "pdf") return Response.json({ error: "format must be html, pdf, png or pptx" }, { status: 400 });
 
   const browser = await launchBrowser();
   try {
+    if (format === "pdf") {
+      // The design's own @page size and margins; US Letter when it has none.
+      const page = await openDesign(browser, file.content, { width: 1280, height: 900 });
+      const pdf = await page.pdf({ preferCSSPageSize: true, printBackground: true, format: "Letter" });
+      return new Response(new Uint8Array(pdf), { headers: { "Content-Type": "application/pdf", "Content-Disposition": attachment(file.path, "pdf") } });
+    }
     if (format === "png") {
       const page = await openDesign(browser, file.content, { width: 1440, height: 900 });
       const height = Math.min(16_000, (await page.evaluate("document.documentElement.scrollHeight")) as number);

@@ -4,7 +4,7 @@ import { useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Canvas, { type CanvasHandle } from "@/components/project/Canvas";
-import { printHtml } from "@/lib/print";
+import { downloadPdf } from "@/lib/print";
 import { IconDownload, IconExpand } from "@/components/ui/Icons";
 
 export default function PublicView({ projectId, title, files, path, html }: { projectId: string; title: string; files: string[]; path: string | null; html: string | null }) {
@@ -33,7 +33,7 @@ export default function PublicView({ projectId, title, files, path, html }: { pr
             <button type="button" className="btn-ghost sm" onClick={() => stage.current?.requestFullscreen?.().catch(() => {})}>
               <IconExpand size={14} /> Full screen
             </button>
-            <button type="button" className="btn-ghost sm" onClick={() => printHtml(html)}>
+            <button type="button" className="btn-ghost sm" onClick={() => path && downloadPdf(projectId, path, html)}>
               <IconDownload size={14} /> PDF
             </button>
           </>

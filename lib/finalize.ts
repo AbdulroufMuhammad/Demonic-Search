@@ -152,6 +152,28 @@ function citations(root: HTMLElement, sources: Map<string, Source>) {
 }
 
 /** Runs on every write of a design file. */
+/**
+ * A printable design (one with an @page rule) keeps its designed layout on
+ * paper. A printed Letter page is only ~690px wide inside its margins, so a
+ * phone breakpoint like `@media (max-width: 760px)` also fires in print and
+ * collapses a two-column résumé into one long column over several pages.
+ * Width-only media queries are therefore limited to screens.
+ */
+export function screenOnlyBreakpoints(css: string) {
+  if (!/@page\b/i.test(css)) return css;
+  const feature = String.raw`\(\s*(?:(?:min|max)-)?(?:device-)?width\s*[:<>=][^)]*\)`;
+  const query = new RegExp(String.raw`@media\s+(${feature}(?:\s+and\s+${feature})*)\s*\{`, "gi");
+  return css.replace(query, "@media screen and $1 {");
+}
+
+function printLayout(root: HTMLElement) {
+  for (const style of root.querySelectorAll("style")) {
+    const css = style.rawText;
+    const fixed = screenOnlyBreakpoints(css);
+    if (fixed !== css) style.set_content(fixed);
+  }
+}
+
 export function finalizeArtifact(html: string, sources: Map<string, Source>): string {
   const root = ensureDocument(html);
   const head = root.querySelector("head")!;
@@ -161,6 +183,7 @@ export function finalizeArtifact(html: string, sources: Map<string, Source>): st
   citations(root, sources);
   cleanCopy(root);
   fixSvgTransforms(root);
+  printLayout(root);
   assignIds(root);
   const out = root.toString();
   return /^\s*<!doctype/i.test(out) ? out : `<!doctype html>\n${out}`;

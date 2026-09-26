@@ -8,7 +8,7 @@ import type { ModelKey } from "@/lib/gateway";
 import type { TweakControl } from "@/lib/finalize";
 import type { BridgeOut, CanvasMode, ElementStyle, Rect } from "@/lib/canvasBridge";
 import { buildThread } from "@/lib/thread";
-import { printHtml } from "@/lib/print";
+import { downloadPdf, printHtml } from "@/lib/print";
 import { relativeTime } from "@/lib/relativeTime";
 import Canvas, { type CanvasHandle } from "@/components/project/Canvas";
 import Thread from "@/components/project/Thread";
@@ -537,7 +537,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     if (res.ok) router.push("/");
   }
 
-  async function exportPdf() {
+  /** The print dialog: Share's fallback when the server can't make the PDF. */
+  async function printPdf() {
     if (!activePath) return;
     const res = await fetch(`/api/projects/${project.id}/file?path=${encodeURIComponent(activePath)}`);
     if (res.ok) printHtml((await res.json()).content);
@@ -885,7 +886,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                     <MenuItem
                       onClick={() => {
                         close();
-                        exportPdf();
+                        if (activePath) void downloadPdf(project.id, activePath);
                       }}
                     >
                       <IconDownload size={14} /> Save as PDF
@@ -1029,7 +1030,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           path={activePath}
           slides={slideCount}
           codebase={project.codebase}
-          onPrint={exportPdf}
+          onPrint={printPdf}
           onClose={() => setShareOpen(false)}
         />}
     </div>
