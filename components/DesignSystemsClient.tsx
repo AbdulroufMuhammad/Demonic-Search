@@ -2,9 +2,70 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { DesignSystem, DSColor, DSFont } from "@/lib/designSystems";
-import { DesignSystemCard, DesignSystemFonts } from "@/components/ui/Pickers";
-import { IconClose, IconPlus } from "@/components/ui/Icons";
+import { CodebasePicker, DesignSystemCard, DesignSystemFonts } from "@/components/ui/Pickers";
+import { IconArrowUp, IconClose, IconPlus } from "@/components/ui/Icons";
+
+/** Hand the job to the design agent: it builds a spec page and saves the system to the picker. */
+function GenerateWithAgent() {
+  const router = useRouter();
+  const [prompt, setPrompt] = useState("");
+  const [codebase, setCodebase] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ready = !!prompt.trim() || !!codebase;
+  async function go() {
+    if (!ready || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          template: "designsystem",
+          codebase,
+          prompt: prompt.trim() || `Extract the design system from the ${codebase} codebase.`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Couldn't start");
+      router.push(`/project/${data.project.id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="ds-generate">
+      <div className="ds-generate-head">
+        <strong>Generate with the agent</strong>
+        <span className="muted">Describe a brand, or connect a codebase to extract its real tokens. The result is saved here.</span>
+      </div>
+      <textarea
+        rows={2}
+        placeholder="e.g. A calm fintech brand: trustworthy, warm neutrals, one confident green"
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            go();
+          }
+        }}
+      />
+      <div className="ds-generate-row">
+        <CodebasePicker value={codebase} onChange={setCodebase} />
+        <span className="grow" />
+        <button type="button" className="btn-accent" onClick={go} disabled={!ready || busy}>
+          {busy ? <span className="spinner" /> : <IconArrowUp size={14} />} Generate
+        </button>
+      </div>
+      {error && <p className="form-error">{error}</p>}
+    </div>
+  );
+}
 
 const BLANK_COLORS: DSColor[] = [
   { name: "Background", hex: "#f7f5f0" },
@@ -64,10 +125,12 @@ export default function DesignSystemsClient({ initialSystems, startNew }: { init
         </div>
         {!editing && (
           <button type="button" className="btn-accent" onClick={() => setEditing(true)}>
-            <IconPlus size={14} /> New design system
+            <IconPlus size={14} /> Create manually
           </button>
         )}
       </div>
+
+      <GenerateWithAgent />
 
       {editing && (
         <div className="ds-editor">

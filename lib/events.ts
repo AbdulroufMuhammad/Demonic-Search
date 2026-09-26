@@ -2,6 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type AgentEvent = {
   /**
+   * thought: the model's reasoning for one step (reasoning models only);
+   * reasoning streams the same text live.
    * note: the agent's one-line narration before a batch of tool calls.
    * tool-call / tool-result: one tool use, paired by payload.callId.
    * questions: the agent asked the user to fill in a short brief.
@@ -10,11 +12,11 @@ export type AgentEvent = {
    * continue: this invocation ran out of time with work left; the client
    * re-POSTs with resume:true.
    */
-  type: "note" | "tool-call" | "tool-result" | "questions" | "error" | "done" | "continue" | "token" | "draft" | "message";
+  type: "thought" | "reasoning" | "note" | "tool-call" | "tool-result" | "questions" | "error" | "done" | "continue" | "token" | "draft" | "message";
   payload: Record<string, unknown>;
 };
 
-const LIVE_ONLY = new Set(["token", "draft", "message"]);
+const LIVE_ONLY = new Set(["token", "reasoning", "draft", "message"]);
 
 /** Append-only event log, persisted to Supabase and streamed live. */
 export function makeEmitter(db: SupabaseClient, projectId: string, onEvent?: (e: AgentEvent & { id?: string; created_at?: string }) => void) {

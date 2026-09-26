@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Question, Row } from "@/lib/thread";
 import Markdown from "@/components/ui/Markdown";
 import { AttachmentChips } from "@/components/ui/Attachments";
-import { IconBolt, IconChevronDown, IconChevronRight, IconComment, IconExternal, IconFile, IconThumbDown, IconThumbUp } from "@/components/ui/Icons";
+import { IconBolt, IconSparkle, IconChevronDown, IconChevronRight, IconComment, IconExternal, IconFile, IconThumbDown, IconThumbUp } from "@/components/ui/Icons";
 
 function UserMessage({ row }: { row: Extract<Row, { kind: "user" }> }) {
   const meta = row.meta ?? {};
@@ -63,6 +63,46 @@ function Activity({ row }: { row: Extract<Row, { kind: "activity" }> }) {
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+const secs = (ms: number) => (ms >= 1000 ? `${Math.round(ms / 1000)}s` : "a moment");
+
+/** The model's reasoning for one step, collapsed to a "Thought for Ns" row that opens to the full text. */
+function Thought({ text, ms }: { text: string; ms: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`activity thought${open ? " open" : ""}`}>
+      <button type="button" className="activity-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <IconSparkle size={13} />
+        <span className="activity-title">Thought for {secs(ms)}</span>
+        {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+      </button>
+      {open && <div className="thought-text">{text}</div>}
+    </div>
+  );
+}
+
+/** The live "Thinking" row: click it to watch the reasoning (or the reply) stream in. */
+function LiveThinking({ reasoning, text, open, setOpen }: { reasoning: string; text: string; open: boolean; setOpen: (fn: (v: boolean) => boolean) => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  const body = reasoning || text;
+  useEffect(() => {
+    if (open && box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [open, body]);
+  return (
+    <div className={`activity active thought${open ? " open" : ""}`}>
+      <button type="button" className="activity-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <IconSparkle size={13} />
+        <span className="activity-title">Thinking</span>
+        {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+      </button>
+      {open && (
+        <div className="thought-text live" ref={box}>
+          {body || <span className="muted">Waiting for the model… This model may not share its reasoning; its progress notes will appear here as it works.</span>}
+        </div>
       )}
     </div>
   );
@@ -152,6 +192,7 @@ export default function Thread({
   rows,
   running,
   liveText,
+  liveReasoning,
   activePath,
   onOpenFile,
   onAnswer,
@@ -159,18 +200,23 @@ export default function Thread({
   rows: Row[];
   running: boolean;
   liveText: string;
+  liveReasoning: string;
   activePath: string | null;
   onOpenFile: (path: string) => void;
   onAnswer: (text: string, answers: Record<string, string>) => void;
 }) {
   const last = rows[rows.length - 1];
-  const showThinking = running && !liveText && !(last?.kind === "activity" && last.active);
+  // Kept here so the row stays open across steps while the user is watching it.
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const showThinking = running && (!!liveReasoning || (!liveText && !(last?.kind === "activity" && last.active)));
   return (
     <div className="thread">
       {rows.map((row) => {
         switch (row.kind) {
           case "user":
             return <UserMessage key={row.key} row={row} />;
+          case "thought":
+            return <Thought key={row.key} text={row.text} ms={row.ms} />;
           case "activity":
             return <Activity key={row.key} row={row} />;
           case "file":
@@ -194,18 +240,11 @@ export default function Thread({
             );
         }
       })}
+      {showThinking && <LiveThinking reasoning={liveReasoning} text={liveText} open={thinkingOpen} setOpen={setThinkingOpen} />}
       {running && liveText && (
         <div className="msg-agent live">
           <div className="prose">
             <Markdown text={liveText.length > 1200 ? "…" + liveText.slice(-1200) : liveText} />
-          </div>
-        </div>
-      )}
-      {showThinking && (
-        <div className="activity active">
-          <div className="activity-head static">
-            <IconBolt size={13} />
-            <span className="activity-title">Thinking</span>
           </div>
         </div>
       )}

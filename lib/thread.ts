@@ -5,6 +5,7 @@ export type Question = { id: string; question: string; options: string[] };
 
 export type Row =
   | { kind: "user"; key: string; text: string; meta: any }
+  | { kind: "thought"; key: string; text: string; ms: number }
   | { kind: "activity"; key: string; title: string; tools: ToolRow[]; active: boolean }
   | { kind: "file"; key: string; path: string; version: number }
   | { kind: "questions"; key: string; intro: string; questions: Question[]; answered: boolean }
@@ -29,6 +30,8 @@ function toolLabel(name: string, p: any, done: boolean): string {
       return `${done ? "Browsed" : "Browsing"} the codebase${p.args?.path || p.path ? ` · ${p.args?.path ?? p.path}` : ""}`;
     case "repo_read":
       return `${done ? "Read" : "Reading"} ${p.args?.path ?? p.path ?? "a file"} from the codebase`;
+    case "save_design_system":
+      return done ? `Saved design system “${p.dsName ?? p.args?.name ?? ""}”` : `Saving design system “${p.args?.name ?? ""}”`;
     case "ask_questions":
       return done ? "Asked a few questions" : "Writing a few questions";
     default:
@@ -71,7 +74,10 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
     }
     const e = it.e!;
     const p = e.payload ?? {};
-    if (e.type === "note") {
+    if (e.type === "thought") {
+      group = null;
+      rows.push({ kind: "thought", key: "e" + e.id, text: String(p.text ?? ""), ms: Number(p.ms) || 0 });
+    } else if (e.type === "note") {
       group = { kind: "activity", key: "e" + e.id, title: String(p.text ?? ""), tools: [], active: false };
       rows.push(group);
     } else if (e.type === "tool-call") {

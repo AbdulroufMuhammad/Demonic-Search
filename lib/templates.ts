@@ -74,6 +74,20 @@ export const TEMPLATES: Template[] = [
       'A 3D scene with three.js loaded as an ES module via an import map from https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js (addons from .../examples/jsm/). Orbit controls, good lighting and materials, full-viewport canvas that resizes. Expose color, rotation speed and similar as tweaks.',
   },
   {
+    id: "landing",
+    label: "Landing page",
+    placeholder: "Design a landing page for…",
+    brief:
+      "A marketing landing page at a 1440px design width that stays responsive: a hero with a sharp value proposition and primary CTA, social proof, features or how it works, pricing or a comparison where it fits, FAQ and footer. Real, specific copy.",
+  },
+  {
+    id: "designsystem",
+    label: "Design system",
+    placeholder: "Create a design system for…",
+    brief:
+      "A design system. If a codebase is connected, extract its real tokens and components from the CSS / Tailwind / theme files instead of inventing them. Make one spec file: color palette with roles and hex values, a type scale using a Google Fonts pairing, spacing and radius scales, and core components (buttons, inputs, cards, navigation, badges) in their states. Then call save_design_system with 5–8 named colors (Background, Surface, Text, Accent, …) and the fonts so it can be picked for future projects.",
+  },
+  {
     id: "research",
     label: "Research",
     placeholder: "Research and summarize…",

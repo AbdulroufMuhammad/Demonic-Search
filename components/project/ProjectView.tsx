@@ -69,6 +69,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   const [events, setEvents] = useState<StoredEvent[]>(initial.events);
   const [running, setRunning] = useState(initial.project.status === "running");
   const [liveText, setLiveText] = useState("");
+  const [liveReasoning, setLiveReasoning] = useState("");
+  const [dsList, setDsList] = useState(systems);
 
   const [activePath, setActivePath] = useState<string | null>(initial.files[0]?.path ?? null);
   const [viewVersion, setViewVersion] = useState<number | null>(null);
@@ -153,6 +155,9 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
         case "token":
           setLiveText((t) => t + String(p.t ?? ""));
           return;
+        case "reasoning":
+          setLiveReasoning((t) => t + String(p.t ?? ""));
+          return;
         case "draft": {
           const cur = draftBuf.current;
           const html = (p.reset || !cur || cur.path !== p.path ? "" : cur.html) + String(p.append ?? "");
@@ -190,8 +195,13 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       }
       const ev: StoredEvent = { id: e.id ?? `live-${tempId++}`, type: e.type, payload: p, created_at: e.created_at ?? new Date().toISOString() };
       setEvents((es) => [...es, ev]);
+      if (e.type === "thought") setLiveReasoning("");
       if (e.type === "note") setLiveText("");
       if (e.type === "tool-call") setLiveText("");
+      if (e.type === "tool-result" && p.name === "save_design_system" && p.system) {
+        setDsList((list) => [...list.filter((d) => d.id !== p.system.id), p.system]);
+        setProject((pr) => ({ ...pr, design_system_id: p.system.id }));
+      }
       if (e.type === "tool-result" && (p.name === "write_file" || p.name === "str_replace") && !p.error && p.path) {
         draftBuf.current = null;
         clearTimeout(draftTimer.current);
@@ -224,6 +234,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       abortRef.current = ctrl;
       setRunning(true);
       setLiveText("");
+      setLiveReasoning("");
       willContinue.current = false;
       try {
         const res = await fetch(`/api/projects/${project.id}/turn`, {
@@ -249,6 +260,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       draftBuf.current = null;
       setDraft(null);
       setLiveText("");
+      setLiveReasoning("");
       setRunning(false);
       const data = await refreshProject();
       const path = activePathRef.current ?? data?.files[0]?.path ?? null;
@@ -499,6 +511,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               rows={rows}
               running={running}
               liveText={liveText}
+              liveReasoning={liveReasoning}
               activePath={activePath}
               onOpenFile={(path) => {
                 setActivePath(path);
@@ -512,7 +525,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           <div className="chat-composer">
             <div className="chat-composer-top">
               <DesignSystemPicker
-                systems={systems}
+                systems={dsList}
                 value={project.design_system_id}
                 variant="chip"
                 side="top"

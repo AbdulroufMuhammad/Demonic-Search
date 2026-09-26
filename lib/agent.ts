@@ -45,6 +45,51 @@ const ASK_SCHEMA: ToolSchema = {
   },
 };
 
+const SAVE_DS_SCHEMA: ToolSchema = {
+  type: "function",
+  function: {
+    name: "save_design_system",
+    description:
+      "Save a design system (named colors + fonts) so it appears in the design system picker for future projects, and apply it to this one. Use when the user asks you to create or extract a design system.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        colors: {
+          type: "array",
+          description: "5–10 colors; include roles named Background, Surface, Text and Accent",
+          items: { type: "object", properties: { name: { type: "string" }, hex: { type: "string", description: "#rrggbb" } }, required: ["name", "hex"] },
+        },
+        fonts: {
+          type: "array",
+          description: "Heading first, then Body (and optionally Mono), as CSS stacks naming Google Fonts families, e.g. 'Fraunces', serif",
+          items: { type: "object", properties: { role: { type: "string" }, stack: { type: "string" } }, required: ["role", "stack"] },
+        },
+      },
+      required: ["name", "colors", "fonts"],
+    },
+  },
+};
+
+async function saveDesignSystem(db: SupabaseClient, projectId: string, args: any) {
+  const colors = (Array.isArray(args.colors) ? args.colors : [])
+    .map((c: any) => ({ name: String(c?.name ?? "Color").slice(0, 40), hex: String(c?.hex ?? "").trim().toLowerCase() }))
+    .map((c: any) => (/^#[0-9a-f]{3}$/.test(c.hex) ? { ...c, hex: "#" + [...c.hex.slice(1)].map((ch) => ch + ch).join("") } : c))
+    .filter((c: any) => /^#[0-9a-f]{6}$/.test(c.hex))
+    .slice(0, 12);
+  const fonts = (Array.isArray(args.fonts) ? args.fonts : [])
+    .filter((f: any) => f?.stack)
+    .slice(0, 4)
+    .map((f: any) => ({ role: String(f.role ?? "Body").slice(0, 40), stack: String(f.stack).replace(/"/g, "'").slice(0, 120) }));
+  if (colors.length < 2) throw new Error("give at least two colors as #rrggbb hex values");
+  if (!fonts.length) throw new Error("give at least one font");
+  const name = String(args.name ?? "").trim().slice(0, 60) || "Untitled system";
+  const { data, error } = await db.from("design_systems").insert({ owner_id: null, name, tokens: { colors, fonts } }).select("*").single();
+  if (error || !data) throw new Error(`saving the design system failed: ${error?.message}`);
+  await db.from("projects").update({ design_system_id: data.id }).eq("id", projectId);
+  return fromRow(data);
+}
+
 function systemPrompt(opts: { templateBrief: string; designSystem: string; codebase: string | null; research: boolean }) {
   return `You are the design agent in Demonic Search, a design tool where people describe what they want and you make it on a live canvas. You work like a senior product designer who writes production-quality HTML, CSS and JavaScript.
 
@@ -57,6 +102,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
 - If a brand-new request leaves the important choices open (audience, content, tone, format), you may call ask_questions once with 1–4 quick questions and suggested answers instead of guessing. If the request is already specific enough, just start designing. Never ask twice in a row.
+- If the user asks you to create, extract or define a design system, make a visual spec file for it (palette with roles and hex values, type scale, spacing/radius, core components in their states) and call save_design_system so it becomes reusable.
 - When the user comments on a specific element, you get its HTML; change that element and leave the rest alone.
 - When you're done, reply in 1–3 short sentences: what you made or changed, and optionally one idea for what to refine next. Plain prose; **bold** is fine; no headings, no code. Make no tool calls after that reply.
 
@@ -149,7 +195,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const template = getTemplate(project.template);
   const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
   const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), ASK_SCHEMA];
+  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), SAVE_DS_SCHEMA, ASK_SCHEMA];
 
   const msgs = (history ?? []).reverse();
   const lastUserIdx = msgs.map((m) => m.role).lastIndexOf("user");
@@ -216,6 +262,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       }
 
       const drafts = new Map<number, { path: string; sent: number; at: number }>();
+      const stepStart = Date.now();
       let r;
       try {
         r = await chat(modelKeyFor(project.model_profile), {
@@ -224,6 +271,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           deadline,
           signal: opts.signal,
           onToken: (t) => void emit({ type: "token", payload: { t } }),
+          onReasoning: (t) => void emit({ type: "reasoning", payload: { t } }),
           onToolDelta: (index, name, args) => {
             if (name !== "write_file") return;
             const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
@@ -252,6 +300,9 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         await emit({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
         break;
       }
+
+      const thought = r.reasoning.trim();
+      if (thought) await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
 
       const text = r.content.trim();
       if (!r.toolCalls.length) {
@@ -324,6 +375,12 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               if (!repo) throw new Error("no codebase is connected");
               result = tc.name === "repo_tree" ? await repo.repo_tree(args) : await repo.repo_read(args);
               summary = { path: args.path ?? "" };
+              break;
+            }
+            case "save_design_system": {
+              const saved = await saveDesignSystem(db, projectId, args);
+              result = { ok: true, id: saved.id, note: "Saved. It's now in the design system picker and set as this project's design system." };
+              summary = { dsName: saved.name, system: saved };
               break;
             }
             case "ask_questions": {

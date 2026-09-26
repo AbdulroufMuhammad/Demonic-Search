@@ -99,6 +99,33 @@ export default function TemplateIcon({ id }: { id: string }) {
             <ellipse cx="32" cy="51" rx="16" ry="2.5" fill="#1a1918" />
           </>
         );
+      case "landing":
+        return (
+          <>
+            <rect x="8" y="6" width="48" height="42" rx="3" {...S} />
+            <Lines x={13} y={12} widths={[6]} />
+            <path d="M42 12h9" {...LINE} />
+            <Lines x={13} y={21} widths={[24, 16]} gap={6} color="#e9e7e0" />
+            <rect x="13" y="32" width="12" height="5" rx="2.5" fill={ACC} />
+            <rect x="36" y="20" width="15" height="17" rx="2" fill="#a9d8cf" />
+          </>
+        );
+      case "designsystem":
+        return (
+          <>
+            <rect x="8" y="6" width="48" height="42" rx="4" {...S} />
+            <rect x="13" y="11" width="7" height="7" rx="1.5" fill={ACC} />
+            <rect x="22" y="11" width="7" height="7" rx="1.5" fill="#a9d8cf" />
+            <rect x="31" y="11" width="7" height="7" rx="1.5" fill="#d6d3cb" />
+            <rect x="40" y="11" width="7" height="7" rx="1.5" fill="#5e5c56" />
+            <text x="13" y="33" fontFamily="Georgia, serif" fontSize="12" fill="#e9e7e0">
+              Aa
+            </text>
+            <rect x="32" y="25" width="17" height="6" rx="3" fill={ACC} />
+            <rect x="32" y="34" width="17" height="6" rx="3" fill="none" stroke="#77746b" strokeWidth={1.4} />
+            <Lines x={13} y={42} widths={[12]} />
+          </>
+        );
       case "research":
         return (
           <>

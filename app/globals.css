@@ -172,7 +172,7 @@ code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surfac
 .template-panel.collapsed { padding-bottom: 12px; }
 .template-panel-head { display: inline-flex; align-items: center; gap: 6px; padding: 4px 2px 10px; color: var(--blue-text); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
 .template-panel.collapsed .template-panel-head { padding-bottom: 0; }
-.template-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.template-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .template-tile { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 4px 10px; border-radius: 10px; border: 1px solid transparent; color: var(--text-2); font-size: 12.5px; text-align: center; }
 .template-tile:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
 .template-tile.selected { background: var(--blue-tile); border-color: #4b7f9c; color: var(--text); }
@@ -255,6 +255,9 @@ code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surfac
 .activity.active .activity-title { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 40%, var(--muted) 80%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.6s linear infinite; }
 .activity.active .activity-head svg:first-child { color: var(--accent); }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.thought-text { max-height: 260px; overflow-y: auto; margin: 0 10px 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); color: var(--text-2); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; scrollbar-width: thin; }
+.thought-text.live { color: var(--muted); }
+.activity.thought .activity-head svg:first-child { color: #b9a6e0; }
 .activity-tools { list-style: none; margin: 0; padding: 0 12px 10px 33px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .activity-tools li { display: flex; flex-direction: column; gap: 2px; }
 .activity-tools a { color: var(--blue-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -382,6 +385,13 @@ code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surfac
 .ds-page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .ds-page-head h1 { margin: 0 0 4px; font-family: var(--font-serif); font-weight: 400; font-size: 34px; letter-spacing: -0.02em; }
 .ds-page-head p { margin: 0; }
+.ds-generate { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--panel); }
+.ds-generate-head { display: flex; flex-direction: column; gap: 2px; }
+.ds-generate-head .muted { font-size: 13px; }
+.ds-generate textarea { width: 100%; resize: none; background: none; border: 0; outline: none; font-size: 15px; padding: 2px; field-sizing: content; min-height: 44px; }
+.ds-generate textarea::placeholder { color: var(--muted); }
+.ds-generate-row { display: flex; align-items: center; gap: 8px; }
+.ds-generate .code-trigger { height: 36px; min-width: 36px; padding: 0 10px; }
 .ds-editor { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 24px; padding: 18px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--panel); }
 @media (max-width: 720px) { .ds-editor { grid-template-columns: 1fr; } }
 .ds-editor-form { display: flex; flex-direction: column; gap: 16px; }

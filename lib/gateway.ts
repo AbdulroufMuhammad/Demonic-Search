@@ -61,6 +61,8 @@ export type ToolSchema = {
 
 export type ChatResult = {
   content: string;
+  /** The model's reasoning stream, for providers that send one (reasoning_content). */
+  reasoning: string;
   toolCalls: { id: string; name: string; args: string }[];
   finish: string | null;
   usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
@@ -70,6 +72,7 @@ export type ChatOpts = {
   messages: ChatMessage[];
   tools?: ToolSchema[];
   onToken?: (t: string) => void;
+  onReasoning?: (t: string) => void;
   onToolDelta?: (index: number, name: string, args: string) => void;
   /** Absolute epoch ms; the whole call (including a fallback attempt) is cut off here. */
   deadline: number;
@@ -130,7 +133,7 @@ async function chatOnce(modelKey: ModelKey, opts: ChatOpts, onFirstByte: () => v
     });
     if (!res.ok || !res.body) throw new GatewayError(res.status, await res.text());
 
-    const out: ChatResult = { content: "", toolCalls: [], finish: null, usage: null };
+    const out: ChatResult = { content: "", reasoning: "", toolCalls: [], finish: null, usage: null };
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -158,9 +161,14 @@ async function chatOnce(modelKey: ModelKey, opts: ChatOpts, onFirstByte: () => v
         const c = chunk.choices?.[0];
         if (!c) continue;
         const d = c.delta ?? {};
-        if (first && (d.content || d.tool_calls || d.reasoning_content)) {
+        const thought = d.reasoning_content ?? d.reasoning;
+        if (first && (d.content || d.tool_calls || thought)) {
           first = false;
           onFirstByte();
+        }
+        if (typeof thought === "string" && thought) {
+          out.reasoning += thought;
+          opts.onReasoning?.(thought);
         }
         if (d.content) {
           out.content += d.content;
