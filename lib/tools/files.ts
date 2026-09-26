@@ -38,6 +38,8 @@ export function makeFileTools(db: SupabaseClient, projectId: string, transform?:
   }
 
   async function write_file({ path, content }: { path: string; content: string }): Promise<FileWrite> {
+    if (/\.(js|mjs|css|json|ts|tsx|jsx)$/i.test(String(path ?? "").trim()))
+      throw new Error("each design is one self-contained HTML file; put scripts and styles inline in it instead of separate files");
     path = cleanPath(path);
     if (typeof content !== "string" || !content.trim()) throw new Error("content is empty");
     if (transform) content = transform(content);

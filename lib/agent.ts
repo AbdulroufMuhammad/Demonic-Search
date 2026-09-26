@@ -54,7 +54,7 @@ const APPEND_SCHEMA: ToolSchema = {
   function: {
     name: "append_file",
     description:
-      "Continue a file you were cut off while writing: appends content to the saved partial text (or to the end of an existing file). Use only when told a partial file is saved.",
+      "Add more to a file you're building in parts: write_file the first part, then append_file the rest (sections, then scripts). Appends before the closing </body>. Also continues a partial file you were cut off writing.",
     parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   },
 };
@@ -135,6 +135,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - Every design is a file in this project: one complete, self-contained HTML document (inline <style> and <script>). External resources only from Google Fonts, cdn.jsdelivr.net, unpkg.com or cdnjs.cloudflare.com. No build step, no frameworks that need compiling.
 - Name files for what they are: "Landing Page.html", "Q3 Board Deck.html", "Onboarding Flow.html". Make a new file for a genuinely new artifact or variation; otherwise edit the existing one.
 - For targeted edits use str_replace with an exact, unique snippet of the current file. Use write_file to create a file or when most of it changes.
+- Each reply can only hold so much. For a large file, write_file the head, styles and first sections, then append_file the rest in one or two more calls, rather than one giant write_file.
 - Keep data-el attributes on elements intact; the user's direct edits rely on them.
 
 ## How you work
@@ -336,7 +337,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   sources.turnLimit = template.id === "research" ? 14 : 6;
   const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
   const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA, ...(settings.partial ? [APPEND_SCHEMA] : [])];
+  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
 
   const all = (history ?? []).reverse();
   await describeNewImages(db, all, emit, { deadline, signal });
@@ -392,6 +393,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   // The last file written this turn that hasn't been through a browser check yet.
   let unchecked: string | null = settings.pendingCheck ?? null;
   let autoChecks = 0;
+  // A request for a design system isn't done until it's saved to the picker.
+  const latestRequest = [...recent].reverse().find((m) => m.role === "user")?.content ?? "";
+  const wantsDesignSystem = template.id === "designsystem" || /design[- ]system/i.test(latestRequest);
+  let dsSaved = false;
+  let dsNudged = false;
   const checkDeferred = !!settings.pendingCheck;
   let badCalls = 0;
   let status: "ready" | "paused" = "ready";
@@ -533,6 +539,16 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
       const text = r.content.trim();
       if (!r.toolCalls.length) {
         // Never hand back unverified work: check the last written file in a real browser and send real problems back to the model.
+        if (wantsDesignSystem && !dsSaved && !dsNudged && touched.size) {
+          dsNudged = true;
+          convo.push({ role: "assistant", content: r.content || "Done." });
+          convo.push({
+            role: "user",
+            content:
+              "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
+          });
+          continue;
+        }
         const tooLate = deadline - Date.now() < CHECK_MIN_MS;
         // Postpone a check to the next round at most once, so a short round can never pause forever.
         if (unchecked && autoChecks < 2 && !(tooLate && checkDeferred)) {
@@ -596,7 +612,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           } catch {
             throw new Error(
               r.finish === "length"
-                ? "your tool call was cut off because it was too long; write a shorter file, or build it up with str_replace"
+                ? "your tool call was cut off because it was too long for one reply. Write the file in parts: write_file with the head, styles and first sections, then append_file for the remaining sections and scripts"
                 : "tool arguments were not valid JSON"
             );
           }
@@ -618,7 +634,11 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               let w;
               if (tc.name === "append_file") {
                 const path = cleanPath(args.path);
-                const base = settings.partial?.path === path ? settings.partial.content : (await fileTools.read_file({ path })).content;
+                // A finished file already ends in </body></html>; new parts go before that, and the parser tidies the rest.
+                const base =
+                  settings.partial?.path === path
+                    ? settings.partial.content
+                    : (await fileTools.read_file({ path })).content.replace(/<\/body>\s*<\/html>\s*$/i, "");
                 w = await fileTools.write_file({ path, content: base + String(args.content ?? "") });
               } else {
                 w = tc.name === "write_file" ? await fileTools.write_file(args) : await fileTools.str_replace(args);
@@ -668,6 +688,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               break;
             }
             case "save_design_system": {
+              dsSaved = true;
               const saved = await saveDesignSystem(db, projectId, args);
               result = { ok: true, id: saved.id, note: "Saved. It's now in the design system picker and set as this project's design system." };
               summary = { dsName: saved.name, system: saved };
