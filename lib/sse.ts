@@ -1,12 +1,12 @@
 /**
  * Stream events to the client as Server-Sent Events while `run` executes.
- * `signal` aborts when the client disconnects (the Stop button), so the run
- * can stop at its next checkpoint instead of spending tokens nobody reads.
+ * A client disconnecting (closing or reloading the tab) does not stop the
+ * run: it keeps working and the page picks it back up. Stopping goes through
+ * the /stop endpoint instead. `signal` is kept for callers that want it.
  */
 export function sseResponse(req: Request, run: (send: (data: unknown) => void, signal: AbortSignal) => Promise<void>) {
   const encoder = new TextEncoder();
   const ctrl = new AbortController();
-  req.signal?.addEventListener("abort", () => ctrl.abort());
   let closed = false;
   const stream = new ReadableStream({
     async start(controller) {
@@ -33,7 +33,6 @@ export function sseResponse(req: Request, run: (send: (data: unknown) => void, s
     },
     cancel() {
       closed = true;
-      ctrl.abort();
     },
   });
 

@@ -47,6 +47,16 @@ const ASK_SCHEMA: ToolSchema = {
   },
 };
 
+const APPEND_SCHEMA: ToolSchema = {
+  type: "function",
+  function: {
+    name: "append_file",
+    description:
+      "Continue a file you were cut off while writing: appends content to the saved partial text (or to the end of an existing file). Use only when told a partial file is saved.",
+    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+  },
+};
+
 const CHECK_SCHEMA: ToolSchema = {
   type: "function",
   function: {
@@ -139,6 +149,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 - Strong hierarchy and real, specific content: never lorem ipsum, never "Feature 1". Invent plausible names, numbers and copy when the user didn't provide them.
 - Icons are inline SVG (simple 1.5px-stroke line icons), never emoji. Images: use CSS gradients, SVG illustration or shapes rather than external stock photo URLs.
 - Layout with CSS grid/flexbox; it must look right at the canvas width and be responsive. Check contrast. Avoid generic "AI" aesthetics: no purple-blue gradients everywhere, no glassmorphism by default, no centered-everything.
+- SVG animation: a CSS transform or animation on an SVG element replaces its transform attribute, so never animate an element that is positioned with transform="…". Position with an outer <g transform="translate(…)"> and animate an inner <g> (set transform-box: fill-box and a transform-origin on it). Never run two animations that both set transform on the same element; nest groups instead.
 - Printable formats (documents, slides, résumés) include @page and page-break rules so browser print → PDF looks right.
 
 ## Tweaks
@@ -181,7 +192,7 @@ function partialJsonString(args: string, key: string): string | null {
   return out;
 }
 
-type ProjectSettings = { designSystems?: string[]; summary?: { upTo: string; text: string } };
+type ProjectSettings = { designSystems?: string[]; summary?: { upTo: string; text: string }; partial?: { path: string; content: string } };
 type HistoryMessage = { id: string; role: string; content: string; meta: any; created_at: string };
 
 const KEEP_RECENT = 12;
@@ -270,13 +281,28 @@ export type TurnOptions = {
   signal?: AbortSignal;
   resume?: boolean;
   activeFile?: string | null;
+  /** Set by the turn route when it claims the project; this turn stops as soon as the project's run_id changes. */
+  runId?: string;
 };
 
 export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnOptions = {}) {
   const deadline = Date.now() + TURN_BUDGET_MS;
   const emit = makeEmitter(db, projectId, opts.onEvent);
-  const touch = (extra: Record<string, unknown> = {}) =>
-    db.from("projects").update({ updated_at: new Date().toISOString(), ...extra }).eq("id", projectId);
+  // Writes only land while this turn still owns the project, so a stopped or superseded turn can't clobber the new one.
+  const touch = (extra: Record<string, unknown> = {}) => {
+    const q = db.from("projects").update({ updated_at: new Date().toISOString(), ...extra }).eq("id", projectId);
+    return opts.runId ? q.eq("run_id", opts.runId) : q;
+  };
+  // Aborts on client disconnect (Stop in this tab) or when the project is stopped/claimed elsewhere.
+  const ctrl = new AbortController();
+  opts.signal?.addEventListener("abort", () => ctrl.abort());
+  const signal = ctrl.signal;
+  const stillOwner = async () => {
+    const { data: live } = await db.from("projects").select("status, run_id").eq("id", projectId).single();
+    const ok = !!live && live.status !== "stopped" && (!opts.runId || live.run_id === opts.runId);
+    if (!ok) ctrl.abort();
+    return ok;
+  };
 
   const { data: project } = await db.from("projects").select("*").eq("id", projectId).single();
   if (!project) throw new Error("project not found");
@@ -295,10 +321,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   sources.turnLimit = template.id === "research" ? 14 : 6;
   const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
   const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
+  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA, ...(settings.partial ? [APPEND_SCHEMA] : [])];
 
   const all = (history ?? []).reverse();
-  await describeNewImages(db, all, emit, { deadline, signal: opts.signal });
+  await describeNewImages(db, all, emit, { deadline, signal });
   // Long chats: the recent messages go in verbatim, everything older as a cached summary.
   const recent = all.slice(-KEEP_RECENT);
   const summary = await summarizeOlder(db, projectId, settings, all.slice(0, -KEEP_RECENT), deadline);
@@ -335,6 +361,10 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     }
   }
   if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
+  if (settings.partial) {
+    const p = settings.partial;
+    context += `\n\nThe time limit cut you off while you were writing "${p.path}". The first ${p.content.length} characters are saved. Don't rewrite them: call append_file with path "${p.path}" and ONLY the rest of the document, continuing exactly where this leaves off:\n\`\`\`html\n…${p.content.slice(-1500)}\n\`\`\``;
+  }
   const lastUser = [...convo].reverse().find((m) => m.role === "user");
   if (lastUser) lastUser.content = `${lastUser.content ?? ""}${context}`;
   else convo.push({ role: "user", content: `Continue.${context}` });
@@ -342,7 +372,23 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   const touched = new Map<string, { version: number; created: boolean }>();
   const checks = new Map<string, number>();
   let badCalls = 0;
-  let status: "ready" | "running" = "ready";
+  let status: "ready" | "paused" = "ready";
+  // A long generation sends no events for minutes; the heartbeat tells other tabs (and resume logic) this turn is alive.
+  let lastBeat = Date.now();
+  const beat = () => {
+    if (Date.now() - lastBeat < 15_000) return;
+    lastBeat = Date.now();
+    void touch();
+    void stillOwner();
+  };
+  // The write_file call being streamed, so a turn cut off by the time limit can hand its partial file to the next round.
+  let writing: { path: string; args: string } | null = null;
+  const savePartial = async () => {
+    const content = writing ? partialJsonString(writing.args, "content") : null;
+    if (!writing?.path || !content || content.length < 400) return;
+    settings.partial = { path: writing.path, content };
+    await db.from("projects").update({ settings }).eq("id", projectId);
+  };
 
   const finish = async (reply: string | null) => {
     if (reply) {
@@ -359,13 +405,17 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      if (opts.signal?.aborted) {
+      if (signal.aborted) {
         await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
         break;
       }
       if (deadline - Date.now() < STOP_MARGIN_MS) {
-        status = "running";
+        status = "paused";
         await emit({ type: "continue", payload: {} });
+        break;
+      }
+      if (!(await stillOwner())) {
+        await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
         break;
       }
 
@@ -377,10 +427,17 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           messages: convo,
           tools,
           deadline,
-          signal: opts.signal,
-          onToken: (t) => void emit({ type: "token", payload: { t } }),
-          onReasoning: (t) => void emit({ type: "reasoning", payload: { t } }),
+          signal,
+          onToken: (t) => {
+            beat();
+            void emit({ type: "token", payload: { t } });
+          },
+          onReasoning: (t) => {
+            beat();
+            void emit({ type: "reasoning", payload: { t } });
+          },
           onToolDelta: (index, name, args) => {
+            beat();
             if (name !== "write_file") return;
             const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
             const now = Date.now();
@@ -396,18 +453,20 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               }
             }
             drafts.set(index, d);
+            if (d.path) writing = { path: d.path, args };
             if (!d.path || content == null || content.length <= d.sent) return;
             void emit({ type: "draft", payload: { path: d.path, append: content.slice(d.sent), reset: d.sent === 0 } });
             d.sent = content.length;
           },
         });
       } catch (e) {
-        if (opts.signal?.aborted) {
+        if (signal.aborted) {
           await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
           break;
         }
         if ((e as any)?.name === "TimeoutError" && deadline - Date.now() < STOP_MARGIN_MS + 5000) {
-          status = "running";
+          await savePartial();
+          status = "paused";
           await emit({ type: "continue", payload: {} });
           break;
         }
@@ -415,6 +474,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
         break;
       }
 
+      writing = null;
       const thought = r.reasoning.trim();
       if (thought) await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
 
@@ -448,7 +508,7 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
             );
           }
           const shown =
-            tc.name === "write_file" || tc.name === "str_replace" || tc.name === "read_file"
+            tc.name === "write_file" || tc.name === "append_file" || tc.name === "str_replace" || tc.name === "read_file"
               ? { path: cleanPath(args.path) }
               : tc.name === "check_design"
                 ? { path: cleanPath(args.path) }
@@ -460,8 +520,20 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
           let summary: Record<string, unknown> = {};
           switch (tc.name) {
             case "write_file":
+            case "append_file":
             case "str_replace": {
-              const w = tc.name === "write_file" ? await fileTools.write_file(args) : await fileTools.str_replace(args);
+              let w;
+              if (tc.name === "append_file") {
+                const path = cleanPath(args.path);
+                const base = settings.partial?.path === path ? settings.partial.content : (await fileTools.read_file({ path })).content;
+                w = await fileTools.write_file({ path, content: base + String(args.content ?? "") });
+              } else {
+                w = tc.name === "write_file" ? await fileTools.write_file(args) : await fileTools.str_replace(args);
+              }
+              if (settings.partial && settings.partial.path === w.path) {
+                delete settings.partial;
+                await db.from("projects").update({ settings }).eq("id", projectId);
+              }
               const prev = touched.get(w.path);
               touched.set(w.path, { version: w.version, created: prev?.created ?? w.created });
               result = { ok: true, path: w.path, version: w.version };
@@ -498,7 +570,8 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
               if ((checks.get(f.path) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
               if (deadline - Date.now() < 45_000) throw new Error("not enough time left in this turn to run a visual check");
               checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
-              const c = await checkDesign(db, projectId, f.content, { deadline, signal: opts.signal });
+              const request = [...recent].reverse().find((m) => m.role === "user" && !m.meta?.answers)?.content ?? project.goal ?? "";
+              const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: `${project.goal ?? ""}${request && request !== project.goal ? `\nLatest request: ${request}` : ""}` });
               const auto = automatedFindings(c);
               const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
               result = {

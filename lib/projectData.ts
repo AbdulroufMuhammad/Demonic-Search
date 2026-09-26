@@ -28,16 +28,26 @@ export type ProjectData = {
   sources: SourceEntry[];
 };
 
-/** A run is considered dead (and the project unlocked) after this long without a heartbeat. */
-export const STALE_RUN_MS = 6 * 60_000;
+/** A running turn heartbeats at least every ~15s; this long without one means its invocation died. */
+export const STALE_RUN_MS = 45_000;
+/** Paused or dead turns are only resumed automatically within this window; older ones just show as ready. */
+export const RESUME_WINDOW_MS = 30 * 60_000;
+
+/** The status to act on: dead "running" turns become resumable "paused", and old or stopped ones "ready". */
+export function effectiveStatus(p: { status: string; updated_at: string }) {
+  const age = Date.now() - new Date(p.updated_at).getTime();
+  if (p.status === "stopped") return "ready";
+  if (p.status === "running" && age > STALE_RUN_MS) return age > RESUME_WINDOW_MS ? "ready" : "paused";
+  if (p.status === "paused" && age > RESUME_WINDOW_MS) return "ready";
+  return p.status;
+}
 
 export function projectInfo(p: any): ProjectInfo {
-  const stale = p.status === "running" && Date.now() - new Date(p.updated_at).getTime() > STALE_RUN_MS;
   return {
     id: p.id,
     title: p.title,
     template: p.template,
-    status: stale ? "ready" : p.status,
+    status: effectiveStatus(p),
     model: modelKeyFor(p.model_profile),
     design_system_id: p.design_system_id ?? null,
     design_systems: Array.isArray(p.settings?.designSystems) ? p.settings.designSystems : [],

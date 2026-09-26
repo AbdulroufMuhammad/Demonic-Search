@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { getProject, notFoundResponse } from "@/lib/access";
 import { runTurn } from "@/lib/agent";
 import { sseResponse } from "@/lib/sse";
-import { STALE_RUN_MS } from "@/lib/projectData";
+import { effectiveStatus } from "@/lib/projectData";
 import { cleanAttachments } from "@/lib/attachments";
 
 export const dynamic = "force-dynamic";
@@ -37,8 +38,18 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
   const body = await req.json().catch(() => ({}));
   const resume = body?.resume === true;
-  const stale = Date.now() - new Date(project.updated_at).getTime() > STALE_RUN_MS;
-  if (project.status === "running" && !resume && !stale) return Response.json({ error: "Still working on the last message" }, { status: 409 });
+  const status = effectiveStatus(project);
+  if (status === "running") return Response.json({ error: "Still working on the last message" }, { status: 409 });
+  if (resume && status !== "paused") return Response.json({ error: "Nothing to resume" }, { status: 409 });
+  // Claim the project atomically (optimistic lock on updated_at) so two tabs can't run or resume the same turn at once.
+  const runId = randomUUID();
+  const { data: claimed } = await admin
+    .from("projects")
+    .update({ status: "running", run_id: runId, updated_at: new Date().toISOString() })
+    .eq("id", params.id)
+    .eq("updated_at", project.updated_at)
+    .select("id");
+  if (!claimed?.length) return Response.json({ error: "Another tab just started this" }, { status: 409 });
 
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   let stored: unknown = null;
@@ -55,6 +66,6 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
   return sseResponse(req, async (send, signal) => {
     if (stored) send({ type: "message", payload: { message: stored, replaces: clientId } });
-    await runTurn(admin, params.id, { onEvent: send, signal, resume, activeFile });
+    await runTurn(admin, params.id, { onEvent: send, signal, resume, activeFile, runId });
   });
 }

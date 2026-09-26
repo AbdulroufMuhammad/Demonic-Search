@@ -246,7 +246,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
         setDsList((list) => [...list.filter((d) => d.id !== p.system.id), p.system]);
         setProject((pr) => ({ ...pr, design_system_id: p.system.id }));
       }
-      if (e.type === "tool-result" && (p.name === "write_file" || p.name === "str_replace") && !p.error && p.path) {
+      if (e.type === "tool-result" && (p.name === "write_file" || p.name === "append_file" || p.name === "str_replace") && !p.error && p.path) {
         draftBuf.current = null;
         draftingPath.current = null;
         clearTimeout(draftTimer.current);
@@ -273,8 +273,12 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     [loadFile]
   );
 
+  // Follows a turn this tab isn't streaming (started elsewhere, or before a reload): refresh until it pauses or ends.
+  const watching = useRef(false);
+  const watchRunRef = useRef<() => void>(() => {});
+
   const runTurn = useCallback(
-    async (body: Record<string, unknown>) => {
+    async (body: Record<string, unknown>): Promise<void> => {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
       setRunning(true);
@@ -288,6 +292,10 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           body: JSON.stringify({ ...body, activeFile: activePathRef.current }),
           signal: ctrl.signal,
         });
+        if (res.status === 409) {
+          abortRef.current = null;
+          return watchRunRef.current();
+        }
         if (!res.ok || !res.body) {
           const err = await res.json().catch(() => ({}));
           handleEvent({ type: "error", payload: { message: err.error ?? `Request failed (${res.status})` } });
@@ -309,6 +317,12 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
       setLiveReasoning("");
       setRunning(false);
       const data = await refreshProject();
+      // The stream can drop while the server keeps going (network hiccup, sleeping phone): keep following it.
+      if (!ctrl.signal.aborted && data?.project.status === "running") return watchRunRef.current();
+      if (!ctrl.signal.aborted && data?.project.status === "paused" && continuations.current < MAX_CONTINUATIONS) {
+        continuations.current += 1;
+        return runTurn({ resume: true });
+      }
       const path = activePathRef.current ?? data?.files[0]?.path ?? null;
       if (path) {
         if (path !== activePathRef.current) setActivePath(path);
@@ -318,8 +332,35 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     [project.id, handleEvent, refreshProject, loadFile]
   );
 
-  function send(text: string, extra: Record<string, unknown> = {}) {
-    if (running || (!text.trim() && !attachments.length)) return;
+  watchRunRef.current = () => {
+    if (watching.current) return;
+    watching.current = true;
+    setRunning(true);
+    const tick = async () => {
+      if (!watching.current) return;
+      const data = await refreshProject();
+      const status = data?.project.status;
+      if (status === "running") {
+        setTimeout(tick, 3000);
+        return;
+      }
+      watching.current = false;
+      if (status === "paused") {
+        continuations.current = 0;
+        runTurn({ resume: true });
+        return;
+      }
+      setRunning(false);
+      const path = activePathRef.current ?? data?.files[0]?.path;
+      if (path) loadFile(path);
+    };
+    setTimeout(tick, 1500);
+  };
+
+  async function send(text: string, extra: Record<string, unknown> = {}) {
+    if (!text.trim() && !attachments.length) return;
+    // Sending while a turn runs replaces it, the way a new instruction would.
+    if (running) await stop();
     const clientId = `local-${tempId++}`;
     const meta: any = { ...(extra.meta as object) };
     if (attachments.length) meta.attachments = attachments;
@@ -330,29 +371,29 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     runTurn({ message: text.trim(), clientId, attachments: attachments.length ? attachments : undefined, ...(extra.body as object) });
   }
 
-  function stop() {
+  /** Stops the turn wherever it runs (this tab, another tab, or a server invocation nobody is watching). */
+  async function stop() {
     abortRef.current?.abort();
+    watching.current = false;
+    setRunning(false);
+    setLiveText("");
+    setLiveReasoning("");
+    draftBuf.current = null;
+    setDraft(null);
+    await fetch(`/api/projects/${project.id}/stop`, { method: "POST" }).catch(() => {});
+    await refreshProject();
   }
 
-  // A brand-new project (created on Home) starts working right away.
+  // A brand-new project (created on Home) starts right away; a turn left running or paused is picked back up.
   const started = useRef(false);
   useEffect(() => {
     if (started.current) return;
     started.current = true;
     const hasReply = initial.messages.some((m) => m.role === "assistant") || initial.events.length > 0;
-    if (initial.project.status === "idle" && !hasReply && initial.messages.some((m) => m.role === "user")) {
-      runTurn({});
-    } else if (initial.project.status === "running") {
-      // Reloaded mid-turn: the previous connection closed, which stops that turn server-side. Wait for it to settle.
-      const iv = setInterval(async () => {
-        const data = await refreshProject();
-        if (data && data.project.status !== "running") {
-          clearInterval(iv);
-          setRunning(false);
-        }
-      }, 2500);
-      return () => clearInterval(iv);
-    }
+    const status = initial.project.status;
+    if (status === "idle" && !hasReply && initial.messages.some((m) => m.role === "user")) runTurn({});
+    else if (status === "paused") runTurn({ resume: true });
+    else if (status === "running") watchRunRef.current();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- canvas messages ----------
@@ -669,7 +710,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                   if (await patchProject({ model: key })) setProject((p) => ({ ...p, model: key }));
                 }}
               />
-              {running ? (
+              {running && !input.trim() && !attachments.length ? (
                 <button type="button" className="btn-send stop" onClick={stop}>
                   <IconStop size={14} /> Stop
                 </button>

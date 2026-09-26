@@ -59,6 +59,34 @@ function cleanCopy(node: HTMLElement) {
   }
 }
 
+/**
+ * In SVG, a CSS `transform` (e.g. from an animation) replaces the element's
+ * transform attribute instead of adding to it, so `<g class="dancer"
+ * transform="translate(596,258)">` with an animated .dancer jumps to 0,0.
+ * Models write this constantly. Fix: move the attribute to a new wrapper
+ * group, so the position and the animation compose.
+ */
+function fixSvgTransforms(root: HTMLElement) {
+  const css = root.querySelectorAll("style").map((s) => s.rawText).join("\n");
+  if (!css) return;
+  const animated = (sel: string) => {
+    const re = new RegExp(`${sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])[^{]*\\{[^}]*\\b(animation|transform)\\s*:`);
+    return re.test(css);
+  };
+  for (const el of root.querySelectorAll("svg [transform]")) {
+    const transform = el.getAttribute("transform");
+    if (!transform || el.tagName === "SVG") continue;
+    const classes = (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+    const id = el.getAttribute("id");
+    const targeted = classes.some((c) => animated(`.${c}`)) || (!!id && animated(`#${id}`));
+    if (!targeted) continue;
+    el.removeAttribute("transform");
+    const wrapper = parse(`<g transform="${transform.replace(/"/g, "&quot;")}"></g>`, PARSE).querySelector("g")!;
+    el.parentNode.exchangeChild(el, wrapper);
+    wrapper.appendChild(el);
+  }
+}
+
 function inSvg(el: HTMLElement) {
   return !!el.closest("svg");
 }
@@ -132,6 +160,7 @@ export function finalizeArtifact(html: string, sources: Map<string, Source>): st
     head.insertAdjacentHTML("beforeend", `<meta name="viewport" content="width=device-width, initial-scale=1">`);
   citations(root, sources);
   cleanCopy(root);
+  fixSvgTransforms(root);
   assignIds(root);
   const out = root.toString();
   return /^\s*<!doctype/i.test(out) ? out : `<!doctype html>\n${out}`;

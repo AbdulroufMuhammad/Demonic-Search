@@ -33,6 +33,8 @@ function toolLabel(name: string, p: any, done: boolean): string {
       return `${done ? "Read" : "Reading"} ${p.path ?? p.args?.path ?? "a file"}`;
     case "write_file":
       return `${done ? "Wrote" : "Writing"} ${p.path ?? p.args?.path ?? "a file"}`;
+    case "append_file":
+      return `${done ? "Finished writing" : "Finishing"} ${p.path ?? p.args?.path ?? "a file"}`;
     case "str_replace":
       return `${done ? "Edited" : "Editing"} ${p.path ?? p.args?.path ?? "a file"}`;
     case "repo_tree":
@@ -117,7 +119,7 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
           links: p.results?.map((r: any) => ({ title: r.title ?? host(r.url ?? ""), url: r.url })) ?? (p.source ? [{ title: p.source.title ?? host(p.source.url ?? ""), url: p.source.url }] : undefined),
         };
       }
-      if ((p.name === "write_file" || p.name === "str_replace") && !p.error && p.path) {
+      if ((p.name === "write_file" || p.name === "append_file" || p.name === "str_replace") && !p.error && p.path) {
         const last = rows[rows.length - 1];
         if (last?.kind === "file" && last.path === p.path) last.version = p.version;
         else rows.push({ kind: "file", key: "f" + e.id, path: p.path, version: p.version });

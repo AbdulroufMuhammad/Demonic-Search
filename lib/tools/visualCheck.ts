@@ -124,7 +124,7 @@ export async function checkDesign(
   db: SupabaseClient,
   projectId: string,
   html: string,
-  opts: { deadline: number; signal?: AbortSignal }
+  opts: { deadline: number; signal?: AbortSignal; request?: string }
 ): Promise<CheckResult> {
   const browser = await launchBrowser();
   let automated: Automated;
@@ -165,7 +165,13 @@ export async function checkDesign(
   }
 
   const content: ContentPart[] = [
-    { type: "text", text: REVIEW_PROMPT },
+    {
+      type: "text",
+      text:
+        (opts.request
+          ? `The user asked for: "${opts.request.slice(0, 600)}"\nFirst check that the design actually shows what they asked for. Every subject, object or element they named must be clearly visible and in the right place (for example "a stickman on a tree" needs a visible stickman on the tree). Anything requested that is missing, cut off, off-screen or in the wrong place is a HIGH severity issue; don't assume it's there because a heading says so.\n\n`
+          : "") + REVIEW_PROMPT,
+    },
     ...tiles.map((t) => ({ type: "image_url" as const, image_url: { url: `data:image/jpeg;base64,${t.toString("base64")}` } })),
   ];
   for (const model of REVIEWERS) {
