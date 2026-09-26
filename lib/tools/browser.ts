@@ -25,25 +25,59 @@ export async function launchBrowser(): Promise<Browser> {
   return chromium.launch({ args: WEBGL_ARGS });
 }
 
+type Fetched = { status: number; headers: Record<string, string>; body: Buffer };
+const fetchCache = new Map<string, Promise<Fetched>>();
+
+/** CDN files (three.js, fonts) are immutable per URL, so a warm instance serves repeats from memory. */
+function fetchCached(url: string): Promise<Fetched> {
+  let hit = fetchCache.get(url);
+  if (!hit) {
+    hit = (async () => {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15_000), cache: "no-store" });
+      const body = Buffer.from(await res.arrayBuffer());
+      const headers: Record<string, string> = { "access-control-allow-origin": "*" };
+      const type = res.headers.get("content-type");
+      if (type) headers["content-type"] = type;
+      return { status: res.status, headers, body };
+    })();
+    fetchCache.set(url, hit);
+    hit.then((r) => r.status >= 400 && fetchCache.delete(url), () => fetchCache.delete(url));
+    if (fetchCache.size > 200) fetchCache.delete(fetchCache.keys().next().value!);
+  }
+  return hit;
+}
+
 /** A page with the design loaded, fonts settled, and only allowlisted network access (plus this app's own uploads). */
 export async function openDesign(browser: Browser, html: string, viewport: { width: number; height: number }, onError?: (msg: string) => void): Promise<Page> {
   const page = await browser.newPage({ viewport });
   if (onError) {
     page.on("pageerror", (e) => onError(e.message.slice(0, 200)));
-    // Failed resource loads are reported separately (as broken images); keep real script errors.
+    // Failed resource loads are reported from the route handler below (only the ones the design is to blame for).
     page.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && onError(m.text().slice(0, 200)));
-    // A script or stylesheet that doesn't load (a wrong CDN path, a blocked host) breaks the design without a JS error.
-    page.on("requestfailed", (r) => {
-      const type = r.resourceType();
-      if (type === "script" || type === "stylesheet") onError(`Couldn't load ${type} ${r.url().slice(0, 160)} (${r.failure()?.errorText ?? "failed"})`);
-    });
   }
   const uploads = allowedUploadHost();
-  await page.route("**/*", (route) => {
-    const url = new URL(route.request().url());
-    if (url.protocol === "data:" || url.protocol === "blob:" || ALLOWED_HOSTS.test(url.hostname) || (uploads && url.hostname === uploads && url.pathname.includes("/artifacts/uploads/")))
-      return route.continue();
-    return route.abort();
+  const report = (type: string, url: string, why: string) => {
+    if (onError && (type === "script" || type === "stylesheet")) onError(`Couldn't load ${type} ${url.slice(0, 160)} (${why})`);
+  };
+  await page.route("**/*", async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    if (url.protocol === "data:" || url.protocol === "blob:") return route.continue();
+    const allowed = ALLOWED_HOSTS.test(url.hostname) || (uploads && url.hostname === uploads && url.pathname.includes("/artifacts/uploads/"));
+    if (!allowed) {
+      report(req.resourceType(), req.url(), "host not allowed; use Google Fonts, jsDelivr, unpkg or cdnjs");
+      return route.abort();
+    }
+    // Fetched by the server and handed to the page: the serverless browser's own network stack fails on
+    // these (net::ERR_INSUFFICIENT_RESOURCES), which made every CDN library and font look missing.
+    try {
+      const res = await fetchCached(req.url());
+      if (res.status >= 400) report(req.resourceType(), req.url(), `HTTP ${res.status}`);
+      return route.fulfill({ status: res.status, headers: res.headers, body: res.body });
+    } catch {
+      // A network hiccup on the checker's side isn't the design's fault: skip it quietly.
+      return route.abort();
+    }
   });
   await page.setContent(html, { waitUntil: "load", timeout: 20_000 }).catch(() => {});
   await page.evaluate("document.fonts && document.fonts.ready.then(() => true)").catch(() => {});

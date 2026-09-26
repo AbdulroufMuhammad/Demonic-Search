@@ -196,9 +196,22 @@ async function render(html: string, printTarget: [number, number] | null): Promi
     lap("inspect");
     const height = Math.min(desktop.height, TILE * (printable ? 2 : MAX_TILES));
     for (let y = 0; y < height; y += TILE) {
-      const shot = await page.screenshot({ type: "jpeg", quality: 65, fullPage: true, timeout: 12_000, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } }).catch(() => null);
+      const shot = await page
+        .screenshot({ type: "jpeg", quality: 65, fullPage: true, timeout: 12_000, clip: { x: 0, y, width: WIDTH, height: Math.min(TILE, height - y) } })
+        .catch((e: Error) => {
+          laps.push(`screenshot failed: ${e.message.split("\n")[0].slice(0, 160)}`);
+          return null;
+        });
       if (!shot) break;
       tiles.push(shot);
+    }
+    // Full-page capture can fail in the serverless browser (WebGL pages especially); a plain viewport shot still shows the design.
+    if (!tiles.length) {
+      const shot = await page.screenshot({ type: "jpeg", quality: 65, timeout: 12_000 }).catch((e: Error) => {
+        laps.push(`viewport screenshot failed: ${e.message.split("\n")[0].slice(0, 160)}`);
+        return null;
+      });
+      if (shot) tiles.push(shot);
     }
     lap(`screenshots(${tiles.length})`);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -283,6 +296,10 @@ export async function checkDesign(
         ]
       : []),
   ];
+  // Never review without a picture: given only the request, the vision model invents problems ("the top isn't visible").
+  if (!tiles.length) {
+    return { automated, issues: [], overall: "Couldn't capture a screenshot of this page, so only the automatic checks ran.", reviewer: null, screenshotUrl };
+  }
   const reviewUntil = Math.min(opts.deadline - 5_000, Date.now() + REVIEW_TIMEOUT_MS + 5_000);
   for (const model of REVIEWERS) {
     if (reviewUntil - Date.now() < 8_000) break;

@@ -15,6 +15,23 @@ messages, the agent event log, web sources and versioned design files
 (Storage). There are no user accounts: every project is open to whoever has
 its URL, and the app talks to Supabase through the service-role client.
 
+## Access keys
+
+Vellum is private. Every page and API call needs an access key, except the
+key entry page (`/access`) and view-only share links (`/p/<id>` and the
+read-only file, render and export endpoints they use).
+
+- **Main key**: the `MAIN_ACCESS_KEY` environment variable. It opens the app
+  and is the only key that can manage keys (avatar menu → Access keys,
+  `/access/keys`). Changing it signs everyone out.
+- **Temporary keys**: created by the main key with an expiry (1 hour to 365
+  days, or a chosen date and time), shown once, stored only as SHA-256 hashes
+  in `access_keys`. They give full use of the app but can't manage keys, and
+  can be revoked; a revoked key stops working within about 30 seconds.
+- Entering a key sets a signed, httpOnly session cookie (`middleware.ts`,
+  `lib/accessKeys.ts`, `lib/accessServer.ts`). Without `MAIN_ACCESS_KEY` a
+  deployment stays locked; local development stays open.
+
 ## How it works
 
 - **Home** (`app/page.tsx`, `components/home/*`) — composer with a design

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AccessMenu from "@/components/access/AccessMenu";
 
 export default function AppHeader({ children }: { children?: React.ReactNode }) {
   return (
@@ -9,9 +10,7 @@ export default function AppHeader({ children }: { children?: React.ReactNode }) 
       </Link>
       <div className="app-header-right">
         {children}
-        <span className="avatar" title="You">
-          Y
-        </span>
+        <AccessMenu />
       </div>
     </header>
   );
