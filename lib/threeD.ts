@@ -61,7 +61,7 @@ Plan (in the plan's sections): the object's real dimensions in metres; a parts l
 Real models first: if the request is (or contains) one of these, load it with GLTFLoader instead of modelling it, then light and present it well:
 ${MODEL_LIBRARY.map((m) => `- ${m.name} (${m.what}): ${m.url}`).join("\n")}
 
-Modelling from primitives:
+Modelling (when no real model fits): never assemble an object from generic boxes, spheres and cylinders, even if a request or process says "simple shapes"; that reads as a toy. Model each part's real form.
 - Build in real units (1 unit = 1 metre) around one origin; put every part in a THREE.Group hierarchy that mirrors the parts list (hull → turret → barrel), placed relative to its parent, so parts sit exactly on or in what they attach to. Nothing may float: every part touches its parent.
 - Pick the technique per part: LatheGeometry for anything turned or round (bottles, nozzles, bodies, wheels), ExtrudeGeometry with bevelEnabled for plates, panels and flat parts with thickness, RoundedBoxGeometry (addons/geometries/RoundedBoxGeometry.js) instead of hard boxes, TubeGeometry along a CatmullRomCurve3 through the two parts' real anchor points for pipes and cables, InstancedMesh for repeats (track links, bolts, rivets, cooling tubes).
 - Garments and soft goods: model from the real pattern silhouette (a Shape of the flat garment, extruded thinly with a generous bevel, then gently displaced), not from cylinders; a T-shirt reads as a flat-lay or on an invisible form.

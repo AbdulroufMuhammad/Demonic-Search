@@ -151,14 +151,14 @@ export const TEMPLATES: Template[] = [
     id: "3d",
     label: "3D object",
     prefill: {
-      lead: "Build a 3D model of ",
-      subject: "a low-poly lighthouse on a small rocky island",
+      lead: "Build a realistic 3D model of ",
+      subject: "a vintage 35mm film camera",
       steps: [
-        "Break the object into simple shapes and decide on the materials and style.",
-        "Build it with good lighting, soft shadows and orbit controls.",
-        "Add a subtle idle animation.",
-        "Expose color and rotation speed as tweaks.",
-        "Look at it from several angles and fix anything that looks wrong.",
+        "Study the real object first: its real dimensions, its main parts and exactly how they connect. Use a real 3D model if one exists.",
+        "Model each part's true form (turned profiles, bevelled panels, curved surfaces, real details at the right scale), with every part attached to the one it sits on. No generic boxes, spheres or cylinders.",
+        "Give every part its real material (metal, paint, rubber, fabric, glass) and light it like a product photo with an HDRI and soft shadows.",
+        "Frame it with the camera fitted to the model, orbit controls and a subtle idle animation, and expose color and rotation speed as tweaks.",
+        "Check it from the front, the side and above against the real thing, and fix anything that floats, is out of proportion or doesn't look real.",
       ],
     },
     brief:
