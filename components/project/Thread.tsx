@@ -8,9 +8,10 @@ import { IconBolt, IconSparkle, IconChevronDown, IconChevronRight, IconComment, 
 
 function UserMessage({ row }: { row: Extract<Row, { kind: "user" }> }) {
   const meta = row.meta ?? {};
+  const anchor = `msg-${row.key.slice(1)}`;
   if (meta.answers) {
     return (
-      <div className="msg-user brief">
+      <div className="msg-user brief" id={anchor}>
         {row.text.split("\n").map((line, i) => {
           const at = line.indexOf(": ");
           return at > 0 ? (
@@ -25,10 +26,10 @@ function UserMessage({ row }: { row: Extract<Row, { kind: "user" }> }) {
     );
   }
   return (
-    <div className="msg-user">
+    <div className="msg-user" id={anchor}>
       {meta.target && (
         <div className="msg-target">
-          <IconComment size={12} /> On &lt;{meta.target.tag}&gt;
+          <IconComment size={12} /> {meta.resolved ? "Resolved · " : ""}On &lt;{meta.target.tag}&gt;
           {meta.target.text ? ` “${String(meta.target.text).slice(0, 60)}${String(meta.target.text).length > 60 ? "…" : ""}”` : ""}
         </div>
       )}

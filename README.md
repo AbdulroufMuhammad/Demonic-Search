@@ -36,6 +36,19 @@ its URL, and the app talks to Supabase through the service-role client.
   to a vision model (Nemotron Omni, falling back to Muse Glimmer). The agent
   fixes what's found; the chat shows the screenshot and findings, and the
   canvas toolbar has a Check button to run it on demand.
+- **Attachments** — images (downscaled in the browser, stored in Storage) are
+  described once by the vision model so the text model can design from them,
+  and can be placed in designs; text files and a local code folder's UI files
+  (CSS, components, theme/Tailwind config) are passed as context. Paste images
+  straight into the composer, or dictate with the mic button.
+- **Comments** — each comment stays pinned to its element (numbered pins in
+  Comment mode) with the agent's reply, until you resolve it.
+- **Present & export** — Present slides shows one slide at a time full screen
+  with speaker notes; Share exports PDF (print), PNG, PowerPoint (one image per
+  slide, with notes) and HTML, and copies a Claude Code handoff prompt.
+- **Long chats** — the last 12 messages go to the model verbatim; older ones as
+  a cached summary. Each turn has a research allowance, and models fall back
+  GLM → GLM Flash → DeepSeek, skipping a provider whose key was rejected.
 - **Canvas** (`components/project/Canvas.tsx`, `lib/canvasBridge.ts`) — designs
   run in an iframe sandboxed without `allow-same-origin`; a small injected
   bridge handles Comment mode (click anything → comment goes to the agent with

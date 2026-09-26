@@ -35,11 +35,35 @@ const BRIDGE = String.raw`(function(){
     box.style.left = (r.left - 3) + "px"; box.style.top = (r.top - 3) + "px";
     box.style.width = (r.width + 6) + "px"; box.style.height = (r.height + 6) + "px";
   }
+  // Comment pins: numbered markers on commented elements, shown in Comment mode.
+  var pins = [], pinLayer = document.createElement("div");
+  pinLayer.setAttribute("data-ds-bridge", "");
+  pinLayer.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646";
+  function renderPins(){
+    if (!pinLayer.isConnected) root.appendChild(pinLayer);
+    pinLayer.innerHTML = "";
+    if (mode !== "comment" || (typeof present !== "undefined" && present)) return;
+    pins.forEach(function(p){
+      var el = document.querySelector('[data-el="' + String(p.id).replace(/[^\w-]/g, "") + '"]');
+      if (!el) return;
+      var r = el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > innerHeight) return;
+      var b = document.createElement("button");
+      b.setAttribute("data-ds-bridge", "");
+      b.textContent = p.n;
+      b.title = "Comment " + p.n;
+      b.style.cssText = "position:absolute;pointer-events:auto;left:" + Math.max(2, Math.min(innerWidth - 26, r.right - 12)) + "px;top:" + Math.max(2, r.top - 12) + "px;width:24px;height:24px;border-radius:50% 50% 50% 3px;background:#d9774f;color:#fff;font:600 11px/20px system-ui,sans-serif;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);cursor:pointer;padding:0;text-align:center";
+      b.addEventListener("click", function(ev){ ev.preventDefault(); ev.stopPropagation(); post({ t: "pin", id: p.id, n: p.n, rect: rectOf(el) }); });
+      pinLayer.appendChild(b);
+    });
+  }
   function repaint(){ place(hoverBox, mode === "view" ? null : hoverEl); place(selBox, mode === "view" ? null : selEl); }
-  addEventListener("scroll", repaint, true); addEventListener("resize", repaint);
+  addEventListener("scroll", function(){ repaint(); renderPins(); }, true);
+  addEventListener("resize", function(){ repaint(); renderPins(); });
   function paintMode(){
-    style.textContent = mode === "comment" ? "*{cursor:crosshair!important}" : mode === "edit" ? "[data-el]{cursor:text!important}" : "";
+    style.textContent = mode === "comment" ? "*{cursor:crosshair!important}[data-ds-bridge]{cursor:pointer!important}" : mode === "edit" ? "[data-el]{cursor:text!important}" : "";
     repaint();
+    renderPins();
   }
   function rectOf(el){ var r = el.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; }
   function hex(c){
@@ -124,6 +148,75 @@ const BRIDGE = String.raw`(function(){
     catch (e) { return []; }
   }
   function pages(){ return document.querySelectorAll(".page, .slide, [data-page]").length; }
+  function slideEls(){ return Array.prototype.slice.call(document.querySelectorAll(".slide, [data-slide]")); }
+
+  // Present mode: one slide at a time, scaled to fit, with every inline style restored on exit.
+  var present = null;
+  function saveStyle(el, list){ list.push([el, el.getAttribute("style")]); }
+  function showSlide(i){
+    if (!present) return;
+    var n = present.slides.length;
+    present.index = Math.max(0, Math.min(n - 1, i));
+    present.slides.forEach(function(el, j){
+      var size = present.sizes[j];
+      if (j !== present.index) { el.style.setProperty("display", "none", "important"); return; }
+      var k = Math.min(innerWidth / size[0], innerHeight / size[1]);
+      el.style.setProperty("display", present.displays[j], "important");
+      el.style.setProperty("position", "fixed", "important");
+      el.style.setProperty("left", "50%", "important");
+      el.style.setProperty("top", "50%", "important");
+      el.style.setProperty("margin", "0", "important");
+      el.style.setProperty("width", size[0] + "px", "important");
+      el.style.setProperty("height", size[1] + "px", "important");
+      el.style.setProperty("transform", "translate(-50%, -50%) scale(" + k + ")", "important");
+      el.style.setProperty("transform-origin", "center", "important");
+      el.style.setProperty("z-index", "2147483646", "important");
+    });
+    var cur = present.slides[present.index];
+    var notesEl = cur.querySelector("aside.notes, .notes");
+    post({ t: "slide", index: present.index, total: n, notes: cur.getAttribute("data-notes") || (notesEl ? notesEl.innerText : "") });
+  }
+  function enterPresent(){
+    var slides = slideEls();
+    if (!slides.length) { post({ t: "slide", index: 0, total: 0, notes: "" }); return; }
+    stopEditing(); selEl = null; hoverEl = null; mode = "view"; paintMode();
+    var saved = [];
+    slides.forEach(function(el){ var a = el.parentElement; while (a && a !== document.documentElement) { if (saved.every(function(p){ return p[0] !== a; })) { saveStyle(a, saved); a.style.setProperty("transform", "none", "important"); } a = a.parentElement; } });
+    var sizes = slides.map(function(el){ return [el.offsetWidth || 1920, el.offsetHeight || 1080]; });
+    var displays = slides.map(function(el){ var d = getComputedStyle(el).display; return d === "none" ? "block" : d; });
+    slides.forEach(function(el){ saveStyle(el, saved); });
+    var backdrop = document.createElement("div");
+    backdrop.setAttribute("data-ds-bridge", "");
+    backdrop.style.cssText = "position:fixed;inset:0;background:#000;z-index:2147483645";
+    root.appendChild(backdrop);
+    saveStyle(document.body, saved);
+    document.body.style.setProperty("overflow", "hidden", "important");
+    present = { slides: slides, sizes: sizes, displays: displays, saved: saved, backdrop: backdrop, index: 0 };
+    showSlide(0);
+  }
+  function exitPresent(){
+    if (!present) return;
+    present.saved.forEach(function(p){ if (p[1] == null) p[0].removeAttribute("style"); else p[0].setAttribute("style", p[1]); });
+    present.backdrop.remove();
+    present = null;
+  }
+  addEventListener("resize", function(){ if (present) showSlide(present.index); });
+  document.addEventListener("keydown", function(e){
+    if (!present) return;
+    var k = e.key;
+    if (k === "ArrowRight" || k === "PageDown" || k === " " || k === "Enter") showSlide(present.index + 1);
+    else if (k === "ArrowLeft" || k === "PageUp" || k === "Backspace") showSlide(present.index - 1);
+    else if (k === "Home") showSlide(0);
+    else if (k === "End") showSlide(present.slides.length - 1);
+    else if (k === "Escape") { post({ t: "present-exit" }); return; }
+    else return;
+    e.preventDefault(); e.stopPropagation();
+  }, true);
+  document.addEventListener("click", function(e){
+    if (!present) return;
+    e.preventDefault(); e.stopPropagation();
+    showSlide(present.index + (e.clientX < innerWidth / 3 ? -1 : 1));
+  }, true);
 
   addEventListener("message", function(e){
     if (e.source !== parent || !e.data || !e.data.__ds) return;
@@ -147,6 +240,12 @@ const BRIDGE = String.raw`(function(){
     } else if (m.t === "tweaks") {
       var vals = m.values || {};
       controls.forEach(function(c){ if (c.name in vals) applyTweak(c, vals[c.name], true); });
+    } else if (m.t === "pins") {
+      pins = Array.isArray(m.pins) ? m.pins : []; renderPins();
+    } else if (m.t === "present") {
+      if (m.on) enterPresent(); else exitPresent();
+    } else if (m.t === "present-go") {
+      if (present) showSlide(m.index != null ? m.index : present.index + (m.dir || 0));
     } else if (m.t === "draft") {
       var doc = new DOMParser().parseFromString(m.html, "text/html");
       if (doc.head.innerHTML !== (window.__dsHead || "")) { window.__dsHead = doc.head.innerHTML; document.head.innerHTML = doc.head.innerHTML; }
@@ -162,7 +261,7 @@ const BRIDGE = String.raw`(function(){
     mount(); paintMode();
     controls = readTweaks();
     controls.forEach(function(c){ applyTweak(c, c.value, false); });
-    post({ t: "ready", pages: pages(), tweaks: controls, title: document.title || "" });
+    post({ t: "ready", pages: pages(), slides: slideEls().length, tweaks: controls, title: document.title || "" });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
   addEventListener("load", function(){
@@ -179,7 +278,10 @@ export function buildSrcDoc(html: string) {
 export const DRAFT_SHELL = buildSrcDoc("<!doctype html><html><head><meta charset=\"utf-8\"></head><body></body></html>");
 
 export type BridgeOut =
-  | { t: "ready"; pages: number; tweaks: TweakControl[]; title: string }
+  | { t: "ready"; pages: number; slides: number; tweaks: TweakControl[]; title: string }
+  | { t: "slide"; index: number; total: number; notes: string }
+  | { t: "present-exit" }
+  | { t: "pin"; id: string; n: number; rect: Rect }
   | { t: "pages"; pages: number }
   | { t: "pick"; id: string | null; tag: string; text: string; html: string; rect: Rect }
   | { t: "select"; id: string; tag: string; rect: Rect; style: ElementStyle }

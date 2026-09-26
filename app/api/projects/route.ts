@@ -3,6 +3,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { MODELS } from "@/lib/gateway";
 import { getTemplate } from "@/lib/templates";
 import { REPO_RE } from "@/lib/tools/github";
+import { cleanAttachments } from "@/lib/attachments";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const idList = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && UUID.test(x)).slice(0, 4) : []);
 
 export async function POST(req: Request) {
   const admin = createAdminClient();
@@ -19,15 +23,20 @@ export async function POST(req: Request) {
 
   const { data: project, error } = await admin
     .from("projects")
-    .insert({ title: title || "Untitled", template, model_profile: model, design_system_id, codebase, goal: prompt })
+    .insert({
+      title: title || "Untitled",
+      template,
+      model_profile: model,
+      design_system_id,
+      codebase,
+      goal: prompt,
+      settings: { designSystems: idList(body.design_systems).filter((id) => id !== design_system_id) },
+    })
     .select()
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const attachments = (Array.isArray(body.attachments) ? body.attachments : [])
-    .filter((a: any) => a && typeof a.name === "string" && typeof a.content === "string")
-    .slice(0, 5)
-    .map((a: any) => ({ name: a.name.slice(0, 120), content: a.content.slice(0, 200_000) }));
+  const attachments = cleanAttachments(body.attachments);
   await admin.from("messages").insert({
     project_id: project.id,
     role: "user",

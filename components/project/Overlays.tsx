@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { TweakControl } from "@/lib/finalize";
 import type { ElementStyle } from "@/lib/canvasBridge";
-import { IconClose, IconComment, IconDownload, IconLink } from "@/components/ui/Icons";
+import { IconClose, IconCode, IconComment, IconDownload, IconLink } from "@/components/ui/Icons";
 
 const optValue = (o: string | { label: string; value: string }) => (typeof o === "string" ? o : o.value);
 const optLabel = (o: string | { label: string; value: string }) => (typeof o === "string" ? o : o.label);
@@ -172,30 +172,127 @@ export function CommentPopover({
   );
 }
 
+export function PinPopover({
+  n,
+  x,
+  y,
+  comment,
+  reply,
+  onResolve,
+  onShowInChat,
+  onClose,
+}: {
+  n: number;
+  x: number;
+  y: number;
+  comment: string;
+  reply: string | null;
+  onResolve: () => void;
+  onShowInChat: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="comment-pop pin-pop" style={{ left: x, top: y }}>
+      <div className="pin-pop-head">
+        <span className="pin-num">{n}</span>
+        <span className="muted">Comment</span>
+        <button type="button" className="icon-btn xs" onClick={onClose} aria-label="Close">
+          <IconClose size={12} />
+        </button>
+      </div>
+      <p className="pin-text">{comment}</p>
+      {reply && <p className="pin-reply">{reply.length > 280 ? reply.slice(0, 280) + "…" : reply}</p>}
+      <div className="comment-pop-actions">
+        <button type="button" className="btn-ghost" onClick={onShowInChat}>
+          Show in chat
+        </button>
+        <button type="button" className="btn-accent" onClick={onResolve}>
+          Resolve
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function handoffPrompt(path: string, html: string, codebase: string | null) {
+  return `Implement this design${codebase ? ` in the ${codebase} codebase` : " in my codebase"}.
+
+- Match the layout, spacing, typography and colors exactly; the file below is the source of truth.
+- Use the project's existing components, styling approach and tokens wherever they exist instead of copying raw CSS.
+- Keep the copy as written. Make it responsive and accessible (semantic elements, focus states, alt text).
+- Ignore data-el attributes and the <script id="tweaks"> block; they're design-tool metadata.
+
+Design file "${path}":
+
+\`\`\`html
+${html}
+\`\`\`
+`;
+}
+
 export function ShareDialog({
   projectId,
   path,
+  slides,
+  codebase,
   onPrint,
   onClose,
 }: {
   projectId: string;
   path: string | null;
+  slides: number;
+  codebase: string | null;
   onPrint: () => void;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const links = [
     { key: "edit", label: "Project link", hint: "Anyone with it can view, chat and edit", url: `${origin}/project/${projectId}` },
     { key: "view", label: "View-only link", hint: "Just the design, no chat or editing", url: `${origin}/p/${projectId}${path ? `?file=${encodeURIComponent(path)}` : ""}` },
   ];
-  async function copy(key: string, url: string) {
+  const exportUrl = (format: string) => `/api/projects/${projectId}/export?format=${format}&path=${encodeURIComponent(path ?? "")}`;
+
+  async function copy(key: string, text: string) {
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(text);
       setCopied(key);
       setTimeout(() => setCopied(null), 1500);
     } catch {}
   }
+
+  /** PNG/PPTX render server-side and can take a few seconds, so show progress and surface errors. */
+  async function download(format: "png" | "pptx") {
+    if (!path) return;
+    setBusy(format);
+    setError(null);
+    try {
+      const res = await fetch(exportUrl(format));
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `Export failed (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = Object.assign(document.createElement("a"), { href: url, download: `${path.replace(/\.html$/i, "")}.${format}` });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handoff(kind: "copy" | "download") {
+    if (!path) return;
+    const res = await fetch(`/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`);
+    if (!res.ok) return setError("Couldn't load the file for handoff.");
+    const text = handoffPrompt(path, (await res.json()).content, codebase);
+    if (kind === "copy") return copy("handoff", text);
+    const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+    Object.assign(document.createElement("a"), { href: url, download: `${path.replace(/\.html$/i, "")} handoff.md` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
   return (
     <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-label="Share">
@@ -217,17 +314,33 @@ export function ShareDialog({
             </button>
           </div>
         ))}
-        <div className="modal-section">Export {path ? `“${path}”` : ""}</div>
+        <div className="modal-section">Export {path ? `“${path.replace(/\.html$/i, "")}”` : ""}</div>
         <div className="export-row">
           <button type="button" className="btn-secondary" disabled={!path} onClick={onPrint}>
             <IconDownload size={14} /> PDF
           </button>
-          <a
-            className={`btn-secondary${path ? "" : " disabled"}`}
-            href={path ? `/api/projects/${projectId}/export?path=${encodeURIComponent(path)}` : undefined}
-          >
-            <IconDownload size={14} /> Standalone HTML
+          <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("png")}>
+            {busy === "png" ? <span className="spinner" /> : <IconDownload size={14} />} PNG
+          </button>
+          {slides > 0 && (
+            <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("pptx")}>
+              {busy === "pptx" ? <span className="spinner" /> : <IconDownload size={14} />} PowerPoint
+            </button>
+          )}
+          <a className={`btn-secondary${path ? "" : " disabled"}`} href={path ? exportUrl("html") : undefined}>
+            <IconDownload size={14} /> HTML
           </a>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-section">Hand off to Claude Code</div>
+        <p className="modal-note tight">A ready-to-paste prompt with the full design, to implement it in {codebase ?? "your codebase"}.</p>
+        <div className="export-row">
+          <button type="button" className="btn-secondary" disabled={!path} onClick={() => handoff("copy")}>
+            <IconCode size={14} /> {copied === "handoff" ? "Copied" : "Copy prompt"}
+          </button>
+          <button type="button" className="btn-secondary" disabled={!path} onClick={() => handoff("download")}>
+            <IconDownload size={14} /> Download .md
+          </button>
         </div>
         <p className="modal-foot">PDF opens your browser&rsquo;s print dialog. Choose “Save as PDF”.</p>
       </div>

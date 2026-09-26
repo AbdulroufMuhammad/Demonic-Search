@@ -15,6 +15,7 @@ export type ProjectInfo = {
   status: string;
   model: ModelKey;
   design_system_id: string | null;
+  design_systems: string[];
   codebase: string | null;
   updated_at: string;
 };
@@ -39,6 +40,7 @@ export function projectInfo(p: any): ProjectInfo {
     status: stale ? "ready" : p.status,
     model: modelKeyFor(p.model_profile),
     design_system_id: p.design_system_id ?? null,
+    design_systems: Array.isArray(p.settings?.designSystems) ? p.settings.designSystems : [],
     codebase: p.codebase ?? null,
     updated_at: p.updated_at,
   };

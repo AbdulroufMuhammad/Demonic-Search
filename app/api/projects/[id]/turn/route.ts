@@ -2,11 +2,10 @@ import { getProject, notFoundResponse } from "@/lib/access";
 import { runTurn } from "@/lib/agent";
 import { sseResponse } from "@/lib/sse";
 import { STALE_RUN_MS } from "@/lib/projectData";
+import { cleanAttachments } from "@/lib/attachments";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
-
-const MAX_ATTACHMENT_CHARS = 200_000;
 
 function cleanMeta(body: any) {
   const meta: Record<string, unknown> = {};
@@ -20,12 +19,8 @@ function cleanMeta(body: any) {
       html: String(t.html ?? "").slice(0, 2000),
     };
   }
-  if (Array.isArray(body?.attachments)) {
-    meta.attachments = body.attachments
-      .filter((a: any) => a && typeof a.name === "string" && typeof a.content === "string")
-      .slice(0, 5)
-      .map((a: any) => ({ name: a.name.slice(0, 120), content: a.content.slice(0, MAX_ATTACHMENT_CHARS) }));
-  }
+  const attachments = cleanAttachments(body?.attachments);
+  if (attachments.length) meta.attachments = attachments;
   if (body?.answers && typeof body.answers === "object") meta.answers = body.answers;
   return meta;
 }

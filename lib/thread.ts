@@ -39,6 +39,8 @@ function toolLabel(name: string, p: any, done: boolean): string {
       return `${done ? "Browsed" : "Browsing"} the codebase${p.args?.path || p.path ? ` · ${p.args?.path ?? p.path}` : ""}`;
     case "repo_read":
       return `${done ? "Read" : "Reading"} ${p.args?.path ?? p.path ?? "a file"} from the codebase`;
+    case "view_image":
+      return `${done ? "Looked at" : "Looking at"} ${p.path ?? p.args?.path ?? "the image"}`;
     case "check_design":
       if (!done) return `Checking ${p.args?.path ?? p.path ?? "the design"} in a browser`;
       return `Checked ${p.path ?? "the design"} · ${p.count ? `${p.count} finding${p.count > 1 ? "s" : ""}` : "looks good"}`;

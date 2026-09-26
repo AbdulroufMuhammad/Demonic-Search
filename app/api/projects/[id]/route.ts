@@ -3,6 +3,9 @@ import { loadProjectData } from "@/lib/projectData";
 import { MODELS } from "@/lib/gateway";
 import { REPO_RE } from "@/lib/tools/github";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const idList = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && UUID.test(x)).slice(0, 4) : []);
+
 export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
@@ -20,6 +23,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   if (typeof body.title === "string" && body.title.trim()) update.title = body.title.trim().slice(0, 120);
   if (typeof body.model === "string" && body.model in MODELS) update.model_profile = body.model;
   if ("design_system_id" in body) update.design_system_id = typeof body.design_system_id === "string" && body.design_system_id ? body.design_system_id : null;
+  if ("design_systems" in body) update.settings = { ...(res.project.settings ?? {}), designSystems: idList(body.design_systems) };
   if ("codebase" in body) update.codebase = typeof body.codebase === "string" && REPO_RE.test(body.codebase) ? body.codebase : null;
   if (!Object.keys(update).length) return Response.json({ error: "nothing to update" }, { status: 400 });
   const { error } = await res.admin.from("projects").update(update).eq("id", params.id);

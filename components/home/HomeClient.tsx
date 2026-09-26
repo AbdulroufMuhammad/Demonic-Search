@@ -8,9 +8,10 @@ import type { ModelKey } from "@/lib/gateway";
 import TemplateIcon from "@/components/home/TemplateIcon";
 import ProjectsBrowser, { type ProjectRow } from "@/components/home/ProjectsBrowser";
 import { CodebasePicker, DesignSystemPicker, ModelPicker, type ModelOption } from "@/components/ui/Pickers";
-import { AttachButton, AttachmentChips, type Attachment } from "@/components/ui/Attachments";
+import { AttachButton, AttachmentChips, filesToAttachments, pastedImages, type Attachment } from "@/components/ui/Attachments";
 import { IconArrowUp, IconChevronDown, IconChevronUp } from "@/components/ui/Icons";
 import AppHeader from "@/components/ui/AppHeader";
+import VoiceButton from "@/components/ui/VoiceButton";
 
 export default function HomeClient({
   systems,
@@ -27,6 +28,7 @@ export default function HomeClient({
   const [prompt, setPrompt] = useState("");
   const [template, setTemplate] = useState("blank");
   const [dsId, setDsId] = useState<string | null>(initialDs);
+  const [dsExtra, setDsExtra] = useState<string[]>([]);
   const [model, setModel] = useState<ModelKey>("glm");
   const [codebase, setCodebase] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -58,7 +60,7 @@ export default function HomeClient({
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: text, template, model, design_system_id: dsId, codebase, attachments }),
+        body: JSON.stringify({ prompt: text, template, model, design_system_id: dsId, design_systems: dsExtra, codebase, attachments }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Couldn't create the project");
@@ -84,6 +86,17 @@ export default function HomeClient({
               value={prompt}
               rows={2}
               onChange={(e) => setPrompt(e.target.value)}
+              onPaste={async (e) => {
+                const imgs = pastedImages(e);
+                if (!imgs.length) return;
+                e.preventDefault();
+                try {
+                  const added = await filesToAttachments(imgs);
+                  setAttachments((cur) => [...cur, ...added].slice(0, 6));
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : String(err));
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -94,11 +107,20 @@ export default function HomeClient({
             <AttachmentChips items={attachments} onRemove={(i) => setAttachments((a) => a.filter((_, j) => j !== i))} />
             <div className="home-composer-row">
               <div className="row-left">
-                <AttachButton onAdd={(a) => setAttachments((cur) => [...cur, ...a].slice(0, 5))} className="square-btn" />
-                <DesignSystemPicker systems={systems} value={dsId} onChange={setDsId} />
+                <AttachButton onAdd={(a) => setAttachments((cur) => [...cur, ...a].slice(0, 6))} className="square-btn" />
+                <DesignSystemPicker
+                  systems={systems}
+                  value={dsId}
+                  extra={dsExtra}
+                  onChange={(primary, extra) => {
+                    setDsId(primary);
+                    setDsExtra(extra);
+                  }}
+                />
                 <CodebasePicker value={codebase} onChange={setCodebase} />
               </div>
               <div className="row-right">
+                <VoiceButton className="square-btn" onText={(t) => setPrompt((cur) => (cur.trim() ? `${cur.trimEnd()} ${t}` : t))} />
                 <ModelPicker models={models} value={model} onChange={chooseModel} />
                 <button type="button" className="send-square" onClick={submit} disabled={!prompt.trim() || submitting} aria-label="Create">
                   {submitting ? <span className="spinner" /> : <IconArrowUp size={20} />}

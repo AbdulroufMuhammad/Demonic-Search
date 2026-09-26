@@ -12,10 +12,11 @@ import { printHtml } from "@/lib/print";
 import { relativeTime } from "@/lib/relativeTime";
 import Canvas, { type CanvasHandle } from "@/components/project/Canvas";
 import Thread from "@/components/project/Thread";
-import { CommentPopover, EditPanel, ShareDialog, TweaksBar } from "@/components/project/Overlays";
+import { CommentPopover, EditPanel, PinPopover, ShareDialog, TweaksBar } from "@/components/project/Overlays";
 import Popover, { MenuItem } from "@/components/ui/Popover";
 import { DesignSystemPicker, ModelPicker, type ModelOption } from "@/components/ui/Pickers";
-import { AttachButton, AttachmentChips, type Attachment } from "@/components/ui/Attachments";
+import VoiceButton from "@/components/ui/VoiceButton";
+import { AttachButton, AttachmentChips, filesToAttachments, pastedImages, type Attachment } from "@/components/ui/Attachments";
 import {
   IconArrowUp,
   IconChevronDown,
@@ -26,6 +27,7 @@ import {
   IconHistory,
   IconHome,
   IconPencil,
+  IconPlay,
   IconPointer,
   IconRefresh,
   IconScan,
@@ -83,6 +85,10 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   const [mode, setMode] = useState<CanvasMode>("view");
   const [zoom, setZoom] = useState(100);
   const [pages, setPages] = useState(0);
+  const [slideCount, setSlideCount] = useState(0);
+  const [presenting, setPresenting] = useState<{ index: number; total: number; notes: string } | null>(null);
+  const [showNotes, setShowNotes] = useState(false);
+  const [openPin, setOpenPin] = useState<{ msgId: string; n: number; rect: Rect } | null>(null);
   const [tweaks, setTweaks] = useState<TweakControl[]>([]);
   const [tweakValues, setTweakValues] = useState<Record<string, any>>({});
   const [tweaksOpen, setTweaksOpen] = useState(false);
@@ -111,6 +117,30 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
 
   const activeFile = files.find((f) => f.path === activePath) ?? null;
   const rows = useMemo(() => buildThread(messages, events, running), [messages, events, running]);
+
+  // Open comments on the file being viewed, numbered in the order they were made.
+  const pins = useMemo(
+    () =>
+      messages
+        .filter((m) => m.role === "user" && m.meta?.target?.id && m.meta.target.path === activePath && !m.meta.resolved)
+        .map((m, i) => ({ msgId: m.id, id: String(m.meta.target.id), n: i + 1 })),
+    [messages, activePath]
+  );
+  useEffect(() => {
+    canvas.current?.post({ t: "pins", pins: pins.map(({ id, n }) => ({ id, n })) });
+  }, [pins, docKey]);
+  const pinsRef = useRef(pins);
+  pinsRef.current = pins;
+
+  async function setResolved(msgId: string, resolved: boolean) {
+    setMessages((ms) => ms.map((m) => (m.id === msgId ? { ...m, meta: { ...m.meta, resolved } } : m)));
+    setOpenPin(null);
+    await fetch(`/api/projects/${project.id}/messages/${msgId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolved }),
+    });
+  }
 
   // ---------- data ----------
   const loadFile = useCallback(
@@ -329,6 +359,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
   const onCanvas = useCallback((m: BridgeOut) => {
     switch (m.t) {
       case "ready":
+        canvas.current?.post({ t: "pins", pins: pinsRef.current.map(({ id, n }) => ({ id, n })) });
+        setSlideCount(m.slides ?? 0);
         setPages(m.pages);
         setTweaks(m.tweaks ?? []);
         setTweakValues(Object.fromEntries((m.tweaks ?? []).map((c) => [c.name, c.value])));
@@ -354,6 +386,17 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
         });
         break;
       }
+      case "pin": {
+        const pin = pinsRef.current.find((p) => p.n === m.n);
+        if (pin) setOpenPin({ msgId: pin.msgId, n: pin.n, rect: m.rect });
+        break;
+      }
+      case "slide":
+        if (m.total > 0) setPresenting({ index: m.index, total: m.total, notes: m.notes });
+        break;
+      case "present-exit":
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        break;
       case "escape":
         setPick(null);
         setSel(null);
@@ -418,6 +461,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
 
   function changeMode(m: CanvasMode) {
     setMode(m);
+    setOpenPin(null);
     setPick(null);
     setSel(null);
     if (m !== "view") setChatOpen(true);
@@ -462,6 +506,36 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     changeMode("view");
     stage.current?.requestFullscreen?.().catch(() => {});
   }
+
+  async function presentSlides() {
+    changeMode("view");
+    await stage.current?.requestFullscreen?.().catch(() => {});
+    canvas.current?.post({ t: "present", on: true });
+    canvas.current?.frame()?.focus();
+  }
+
+  // Leaving full screen (Esc, or the browser's own control) always ends the slideshow.
+  useEffect(() => {
+    const onChange = () => {
+      if (document.fullscreenElement) return;
+      canvas.current?.post({ t: "present", on: false });
+      setPresenting(null);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!presenting) return;
+    const onKey = (e: KeyboardEvent) => {
+      const dir = e.key === "ArrowRight" || e.key === " " || e.key === "PageDown" ? 1 : e.key === "ArrowLeft" || e.key === "PageUp" ? -1 : 0;
+      if (!dir) return;
+      e.preventDefault();
+      canvas.current?.post({ t: "present-go", dir });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [presenting]);
 
   // ---------- geometry for overlays ----------
   const scale = zoom / 100;
@@ -543,10 +617,12 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               <DesignSystemPicker
                 systems={dsList}
                 value={project.design_system_id}
+                extra={project.design_systems}
                 variant="chip"
                 side="top"
-                onChange={async (id) => {
-                  if (await patchProject({ design_system_id: id })) setProject((p) => ({ ...p, design_system_id: id }));
+                onChange={async (id, extra) => {
+                  setProject((p) => ({ ...p, design_system_id: id, design_systems: extra }));
+                  await patchProject({ design_system_id: id, design_systems: extra });
                 }}
               />
               {project.codebase && (
@@ -562,6 +638,17 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               value={input}
               rows={3}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={async (e) => {
+                const imgs = pastedImages(e);
+                if (!imgs.length) return;
+                e.preventDefault();
+                try {
+                  const added = await filesToAttachments(imgs);
+                  setAttachments((cur) => [...cur, ...added].slice(0, 6));
+                } catch (err) {
+                  alert(err instanceof Error ? err.message : String(err));
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -570,7 +657,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               }}
             />
             <div className="chat-composer-row">
-              <AttachButton onAdd={(a) => setAttachments((cur) => [...cur, ...a].slice(0, 5))} className="square-btn sm" />
+              <AttachButton onAdd={(a) => setAttachments((cur) => [...cur, ...a].slice(0, 6))} className="square-btn sm" />
+              <VoiceButton className="square-btn sm" onText={(t) => setInput((cur) => (cur.trim() ? `${cur.trimEnd()} ${t}` : t))} />
               <span className="grow" />
               <ModelPicker
                 models={models}
@@ -710,7 +798,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                   <IconPointer size={15} />
                 </button>
                 <button type="button" className={mode === "comment" ? "on" : ""} disabled={!html || viewVersion != null || running} onClick={() => changeMode("comment")}>
-                  <IconComment size={15} /> Comment
+                  <IconComment size={15} /> Comment{pins.length > 0 && <span className="count-badge">{pins.length}</span>}
                 </button>
                 <button type="button" className={mode === "edit" ? "on" : ""} disabled={!html || viewVersion != null || running} onClick={() => changeMode("edit")}>
                   <IconPencil size={15} /> Edit
@@ -726,6 +814,17 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                 )}
                 render={(close) => (
                   <>
+                    {slideCount > 0 && (
+                      <MenuItem
+                        onClick={() => {
+                          close();
+                          presentSlides();
+                        }}
+                        hint={`${slideCount} slides`}
+                      >
+                        <IconPlay size={14} /> Present slides
+                      </MenuItem>
+                    )}
                     <MenuItem
                       onClick={() => {
                         close();
@@ -802,6 +901,30 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               </div>
             )}
             {drafting && <div className="stage-badge">Writing {draft!.path}…</div>}
+            {presenting && (
+              <>
+                {showNotes && (
+                  <div className="present-notes">{presenting.notes || <span className="muted">No speaker notes on this slide.</span>}</div>
+                )}
+                <div className="present-bar">
+                  <button type="button" onClick={() => canvas.current?.post({ t: "present-go", dir: -1 })} disabled={presenting.index === 0} aria-label="Previous slide">
+                    ‹
+                  </button>
+                  <span>
+                    {presenting.index + 1} / {presenting.total}
+                  </span>
+                  <button type="button" onClick={() => canvas.current?.post({ t: "present-go", dir: 1 })} disabled={presenting.index >= presenting.total - 1} aria-label="Next slide">
+                    ›
+                  </button>
+                  <button type="button" className={showNotes ? "on" : ""} onClick={() => setShowNotes((v) => !v)}>
+                    Notes
+                  </button>
+                  <button type="button" onClick={() => document.exitFullscreen().catch(() => {})}>
+                    Exit
+                  </button>
+                </div>
+              </>
+            )}
             {pick && pickPos && (
               <CommentPopover
                 x={pickPos.x}
@@ -819,6 +942,28 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
                 }}
               />
             )}
+            {openPin && mode === "comment" && (() => {
+              const idx = messages.findIndex((m) => m.id === openPin.msgId);
+              const comment = messages[idx];
+              const reply = messages.slice(idx + 1).find((m) => m.role === "assistant");
+              if (!comment) return null;
+              return (
+                <PinPopover
+                  n={openPin.n}
+                  x={Math.max(12, Math.min((stage.current?.clientWidth ?? 800) - 320, (openPin.rect.x + openPin.rect.w) * scale - 150))}
+                  y={Math.max(12, Math.min((stage.current?.clientHeight ?? 600) - 220, openPin.rect.y * scale + 18))}
+                  comment={comment.content}
+                  reply={reply?.content ?? null}
+                  onResolve={() => setResolved(comment.id, true)}
+                  onShowInChat={() => {
+                    setChatOpen(true);
+                    setOpenPin(null);
+                    setTimeout(() => document.getElementById(`msg-${comment.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+                  }}
+                  onClose={() => setOpenPin(null)}
+                />
+              );
+            })()}
             {sel && mode === "edit" && (
               <EditPanel
                 tag={sel.tag}
@@ -838,7 +983,14 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
         </div>
       </section>
 
-      {shareOpen && <ShareDialog projectId={project.id} path={activePath} onPrint={exportPdf} onClose={() => setShareOpen(false)} />}
+      {shareOpen && <ShareDialog
+          projectId={project.id}
+          path={activePath}
+          slides={slideCount}
+          codebase={project.codebase}
+          onPrint={exportPdf}
+          onClose={() => setShareOpen(false)}
+        />}
     </div>
   );
 }

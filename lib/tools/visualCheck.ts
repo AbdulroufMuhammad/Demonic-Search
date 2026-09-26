@@ -1,13 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Browser } from "playwright-core";
 import { chat, type ContentPart, type ModelKey } from "@/lib/gateway";
 import { BUCKET } from "@/lib/tools/files";
+import { launchBrowser, openDesign } from "@/lib/tools/browser";
 
 const WIDTH = 1280;
 const TILE = 1100;
 const MAX_TILES = 3;
-// The design rules only allow these hosts, so the checker only lets these through.
-const ALLOWED_HOSTS = /^(fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com)$/;
 const REVIEWERS: ModelKey[] = ["omni", "muse"];
 
 export type Automated = {
@@ -29,17 +27,6 @@ export type CheckResult = {
   reviewer: string | null;
   screenshotUrl: string | null;
 };
-
-async function launch(): Promise<Browser> {
-  const { chromium } = await import("playwright-core");
-  if (process.env.CHROMIUM_PATH) return chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-    const sparticuz = (await import("@sparticuz/chromium")).default;
-    return chromium.launch({ executablePath: await sparticuz.executablePath(), args: sparticuz.args, headless: true });
-  }
-  // Local development: Playwright's own installed browser.
-  return chromium.launch();
-}
 
 /**
  * Runs inside the page: cheap, deterministic checks a screenshot can miss.
@@ -139,23 +126,12 @@ export async function checkDesign(
   html: string,
   opts: { deadline: number; signal?: AbortSignal }
 ): Promise<CheckResult> {
-  const browser = await launch();
+  const browser = await launchBrowser();
   let automated: Automated;
   const tiles: Buffer[] = [];
   try {
-    const page = await browser.newPage({ viewport: { width: WIDTH, height: 800 } });
     const jsErrors: string[] = [];
-    page.on("pageerror", (e) => jsErrors.push(e.message.slice(0, 200)));
-    // Failed resource loads are already reported as broken images; keep real script errors.
-    page.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && jsErrors.push(m.text().slice(0, 200)));
-    await page.route("**/*", (route) => {
-      const url = new URL(route.request().url());
-      if (url.protocol === "data:" || url.protocol === "blob:" || ALLOWED_HOSTS.test(url.hostname)) return route.continue();
-      return route.abort();
-    });
-    await page.setContent(html, { waitUntil: "load", timeout: 20_000 }).catch(() => {});
-    await page.evaluate("document.fonts && document.fonts.ready.then(() => true)").catch(() => {});
-    await page.waitForTimeout(700);
+    const page = await openDesign(browser, html, { width: WIDTH, height: 800 }, (msg) => jsErrors.push(msg));
 
     const desktop = (await page.evaluate(INSPECT_PAGE)) as PageReport;
     const height = Math.min(desktop.height, TILE * MAX_TILES);

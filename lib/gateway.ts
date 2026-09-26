@@ -39,13 +39,20 @@ export function modelKeyFor(stored: string | null | undefined): ModelKey {
   return stored === "fast" ? "glm-flash" : "glm";
 }
 
-export const FALLBACKS: Record<ModelKey, ModelKey> = {
-  glm: "deepseek",
-  "glm-flash": "deepseek",
-  muse: "glm",
-  omni: "glm",
-  deepseek: "glm",
+/** Models to try, in order, when one fails before streaming anything. Same-provider options come first. */
+export const FALLBACKS: Record<ModelKey, ModelKey[]> = {
+  glm: ["glm-flash", "deepseek"],
+  "glm-flash": ["glm", "deepseek"],
+  deepseek: ["glm-flash", "glm"],
+  omni: ["glm-flash", "glm"],
+  muse: ["glm-flash", "glm"],
 };
+
+const KEY_ENV = { nvidia: "NVIDIA_API_KEY", deepseek: "DEEPSEEK_API_KEY" } as const;
+// A provider that rejected its key is skipped for a while instead of costing every call a failed round trip.
+const badKeyUntil = new Map<ModelConfig["provider"], number>();
+const BAD_KEY_MS = 10 * 60_000;
+const keyOk = (k: ModelKey) => (badKeyUntil.get(MODELS[k].provider) ?? 0) < Date.now();
 
 export type ContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
@@ -210,17 +217,26 @@ async function chatOnce(modelKey: ModelKey, opts: ChatOpts, onFirstByte: () => v
  * surfaced instead of silently restarting on another model.
  */
 export async function chat(modelKey: ModelKey, opts: ChatOpts): Promise<ChatResult> {
-  let streamed = false;
-  try {
-    return await chatOnce(modelKey, opts, () => (streamed = true));
-  } catch (e) {
-    if (streamed || opts.signal?.aborted || opts.noFallback) throw e;
-    const timedOut = (e as any)?.name === "TimeoutError";
-    const providerFailure = e instanceof GatewayError && (e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500);
-    const fb = FALLBACKS[modelKey];
-    if ((timedOut || providerFailure) && fb !== modelKey && opts.deadline - Date.now() > 5000) {
-      return chatOnce(fb, opts, () => {});
+  const chain = [modelKey, ...(opts.noFallback ? [] : FALLBACKS[modelKey])];
+  const candidates = chain.filter(keyOk);
+  if (!candidates.length) candidates.push(modelKey);
+  let lastError: unknown;
+  for (const key of candidates) {
+    if (lastError && opts.deadline - Date.now() < 5000) break;
+    let streamed = false;
+    try {
+      return await chatOnce(key, opts, () => (streamed = true));
+    } catch (e) {
+      lastError = e;
+      if (e instanceof GatewayError && (e.status === 401 || e.status === 403)) badKeyUntil.set(MODELS[key].provider, Date.now() + BAD_KEY_MS);
+      const timedOut = (e as any)?.name === "TimeoutError";
+      const retryable = timedOut || (e instanceof GatewayError && (e.status === 401 || e.status === 403 || e.status === 404 || e.status === 429 || e.status >= 500));
+      if (streamed || opts.signal?.aborted || !retryable) break;
     }
-    throw e;
   }
+  if (lastError instanceof GatewayError && (lastError.status === 401 || lastError.status === 403)) {
+    const provider = MODELS[candidates[candidates.length - 1]].provider;
+    throw new Error(`The ${provider === "nvidia" ? "NVIDIA" : "DeepSeek"} API rejected its key. Check ${KEY_ENV[provider]} in your deployment's environment variables.`);
+  }
+  throw lastError;
 }

@@ -29,7 +29,7 @@ export const TEMPLATES: Template[] = [
     label: "Slides",
     placeholder: "Make a pitch deck about…",
     brief:
-      'A slide deck. Each slide is a 1920×1080 <section class="slide">, stacked vertically with a gap and scaled with CSS to fit the viewport width. Include print CSS (@page { size: 1920px 1080px; margin: 0 } and a page break after each slide) so it exports as one slide per page. Arrow keys scroll to the next/previous slide. One idea per slide, big type, strong hierarchy; speaker notes go in a data-notes attribute.',
+      'A slide deck. Each slide is a 1920×1080 <section class="slide">, stacked vertically with a gap and scaled with CSS to fit the viewport width. Include print CSS (@page { size: 1920px 1080px; margin: 0 } and a page break after each slide) so it exports as one slide per page. Arrow keys scroll to the next/previous slide. Present mode in this tool shows one .slide at a time full screen and PowerPoint export captures each .slide as an image, so every slide must stand on its own at 1920×1080. One idea per slide, big type, strong hierarchy; speaker notes go in a data-notes attribute.',
   },
   {
     id: "document",

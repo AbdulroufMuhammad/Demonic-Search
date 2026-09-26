@@ -5,7 +5,7 @@ import Link from "next/link";
 import Popover from "@/components/ui/Popover";
 import { googleFontsHref, type DesignSystem } from "@/lib/designSystems";
 import type { ModelKey } from "@/lib/gateway";
-import { IconCheck, IconChevronDown, IconClose, IconCode, IconFeather, IconGithub, IconPlus, IconSearch } from "@/components/ui/Icons";
+import { IconCheck, IconChevronDown, IconClose, IconCode, IconFeather, IconGithub, IconList, IconPlus, IconSearch } from "@/components/ui/Icons";
 
 export type ModelOption = { key: ModelKey; label: string; note: string };
 
@@ -24,7 +24,7 @@ export function DesignSystemFonts({ systems }: { systems: DesignSystem[] }) {
 }
 
 /** A little specimen of a design system: its type, palette and a button. */
-export function DesignSystemCard({ ds, selected, onClick }: { ds: DesignSystem; selected?: boolean; onClick?: () => void }) {
+export function DesignSystemCard({ ds, selected, badge, onClick }: { ds: DesignSystem; selected?: boolean; badge?: string; onClick?: () => void }) {
   const bg = pick(ds, ["background", "paper"], ds.colors[0]?.hex ?? "#f4f2ee");
   const ink = pick(ds, ["text", "ink"], "#1d1c1a");
   const accent = pick(ds, ["accent"], ds.colors[ds.colors.length - 1]?.hex ?? "#d9774f");
@@ -32,6 +32,7 @@ export function DesignSystemCard({ ds, selected, onClick }: { ds: DesignSystem; 
   const body = ds.fonts[1]?.stack ?? head;
   return (
     <button type="button" className={`ds-card${selected ? " selected" : ""}`} onClick={onClick}>
+      {badge && <span className="ds-card-badge">{badge}</span>}
       <div className="ds-card-preview" style={{ background: bg, color: ink }}>
         <span className="ds-card-kicker" style={{ color: accent, fontFamily: body }}>
           {ds.fonts.map((f) => f.stack.match(/'([^']+)'/)?.[1] ?? f.stack.split(",")[0]).filter((v, i, a) => a.indexOf(v) === i).join(" / ")}
@@ -56,34 +57,48 @@ export function DesignSystemCard({ ds, selected, onClick }: { ds: DesignSystem; 
   );
 }
 
+/**
+ * Pick one design system, or switch on Multi to combine several: the first
+ * one chosen leads, the others are offered to the agent as secondary sources.
+ */
 export function DesignSystemPicker({
   systems,
   value,
+  extra = [],
   onChange,
   variant = "large",
   side = "bottom",
 }: {
   systems: DesignSystem[];
   value: string | null;
-  onChange: (id: string | null) => void;
+  extra?: string[];
+  onChange: (primary: string | null, extra: string[]) => void;
   variant?: "large" | "chip";
   side?: "top" | "bottom";
 }) {
   const [q, setQ] = useState("");
+  const [multi, setMulti] = useState(extra.length > 0);
+  const chosen = [value, ...extra].filter((v): v is string => !!v);
   const current = systems.find((s) => s.id === value) ?? null;
+  const label = current ? `${current.name}${extra.length ? ` +${extra.length}` : ""}` : null;
   const shown = systems.filter((s) => s.name.toLowerCase().includes(q.trim().toLowerCase()));
   const groups = [
     { label: "Included design systems", items: shown.filter((s) => s.builtin) },
     { label: "Your design systems", items: shown.filter((s) => !s.builtin) },
   ].filter((g) => g.items.length);
 
+  function toggle(id: string) {
+    const next = chosen.includes(id) ? chosen.filter((x) => x !== id) : [...chosen, id].slice(0, 5);
+    onChange(next[0] ?? null, next.slice(1));
+  }
+
   return (
     <Popover
       side={side}
       panelClassName="ds-pop"
-      trigger={(open, toggle) =>
+      trigger={(open, toggleOpen) =>
         variant === "large" ? (
-          <button type="button" className={`ds-trigger${open ? " open" : ""}`} onClick={toggle}>
+          <button type="button" className={`ds-trigger${open ? " open" : ""}`} onClick={toggleOpen}>
             <span className="ds-trigger-icon">
               <IconFeather size={20} />
             </span>
@@ -91,12 +106,12 @@ export function DesignSystemPicker({
               <span className="ds-trigger-kicker">
                 Design system <IconChevronDown size={12} />
               </span>
-              <span className="ds-trigger-name">{current?.name ?? "None"}</span>
+              <span className="ds-trigger-name">{label ?? "None"}</span>
             </span>
           </button>
         ) : (
-          <button type="button" className="chip-trigger" onClick={toggle}>
-            {current?.name ?? "Design System"} <IconChevronDown size={12} />
+          <button type="button" className="chip-trigger" onClick={toggleOpen}>
+            {label ?? "Design System"} <IconChevronDown size={12} />
           </button>
         )
       }
@@ -110,10 +125,21 @@ export function DesignSystemPicker({
             </label>
             <button
               type="button"
+              className={`multi-btn${multi ? " on" : ""}`}
+              title="Combine several design systems"
+              onClick={() => {
+                if (multi && extra.length) onChange(value, []);
+                setMulti((v) => !v);
+              }}
+            >
+              <IconList size={13} /> Multi
+            </button>
+            <button
+              type="button"
               className="icon-btn"
               title="No design system"
               onClick={() => {
-                onChange(null);
+                onChange(null, []);
                 close();
               }}
             >
@@ -123,6 +149,7 @@ export function DesignSystemPicker({
               <IconPlus size={14} />
             </Link>
           </div>
+          {multi && <div className="pop-hint">Pick several. The first one leads; the rest are extra sources.</div>}
           <div className="ds-pop-scroll">
             {groups.map((g) => (
               <div key={g.label}>
@@ -132,9 +159,11 @@ export function DesignSystemPicker({
                     <DesignSystemCard
                       key={s.id}
                       ds={s}
-                      selected={s.id === value}
+                      selected={chosen.includes(s.id)}
+                      badge={multi && chosen.includes(s.id) ? String(chosen.indexOf(s.id) + 1) : undefined}
                       onClick={() => {
-                        onChange(s.id);
+                        if (multi) return toggle(s.id);
+                        onChange(s.id, []);
                         close();
                       }}
                     />

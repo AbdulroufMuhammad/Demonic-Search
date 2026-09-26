@@ -1,13 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { chat, modelKeyFor, type ChatMessage, type ToolSchema } from "@/lib/gateway";
-import { makeEmitter, type AgentEvent } from "@/lib/events";
+import { makeEmitter, type AgentEvent, type Emit } from "@/lib/events";
 import { FILE_TOOL_SCHEMAS, makeFileTools, cleanPath } from "@/lib/tools/files";
 import { SourceRegistry, WEB_TOOL_SCHEMAS } from "@/lib/tools/tavily";
 import { makeRepoTools, REPO_TOOL_SCHEMAS } from "@/lib/tools/github";
 import { finalizeArtifact, removeEmDashes } from "@/lib/finalize";
 import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
-import { describeForAgent, fromRow } from "@/lib/designSystems";
+import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
+import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
 
 // One invocation must finish inside the route's maxDuration (300s). Past
@@ -144,7 +145,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 Expose 2–5 meaningful live controls when they'd help the user explore (accent color, density, speed, which screen to show, a layout variant). Declare them in the file as:
 <script type="application/json" id="tweaks">[{"name":"accent","label":"Accent","type":"color","value":"#d9774f"},{"name":"speed","type":"range","min":200,"max":2000,"step":50,"value":700,"unit":"ms"},{"name":"startScreen","type":"select","options":["home","detail"],"value":"home"},{"name":"grid","type":"toggle","value":false}]</script>
 The canvas applies every value as a CSS custom property on :root (--accent, --speed with its unit, --grid as 1/0), as an attribute on <html> (data-start-screen="detail"; camelCase names become kebab-case), and fires window.addEventListener("tweak", e => e.detail.name / e.detail.value) on load and on every change. Use var(--name) in CSS or the event in JS.
-${opts.research ? "\n## Research\nweb_search and web_fetch give you sources with IDs (S1, S2…). Cite every factual sentence as [S3] or [S3, S5] using only IDs you were given; a numbered sources list is added automatically. Never write URLs as citations.\n" : "\n## Facts\nweb_search / web_fetch are available if the request depends on real-world facts you're unsure of; cite what you use as [S3]. Most design work needs no search.\n"}
+${opts.research ? "\n## Research\nDo one focused round: a few targeted searches, then web_fetch the 2 to 4 best sources, then write. Don't keep searching once you can answer. Cite every factual sentence as [S3] or [S3, S5] using only IDs you were given; a numbered sources list is added automatically. Never write URLs as citations. Each turn has a research allowance of 14 searches and fetches.\n" : "\n## Facts\nDraft first. Write the design straight away from what you know; use web_search / web_fetch only for a specific real-world fact you'd otherwise get wrong, and cite it as [S3]. Most design work needs no search at all, and each turn allows at most 6 searches and fetches.\n"}
 ## This project
 Starting template: ${opts.templateBrief}
 ${opts.designSystem || "No design system selected. Choose a fitting visual direction yourself."}
@@ -180,6 +181,71 @@ function partialJsonString(args: string, key: string): string | null {
   return out;
 }
 
+type ProjectSettings = { designSystems?: string[]; summary?: { upTo: string; text: string } };
+type HistoryMessage = { id: string; role: string; content: string; meta: any; created_at: string };
+
+const KEEP_RECENT = 12;
+
+function describeSystems(systems: DesignSystem[]) {
+  if (!systems.length) return "";
+  const [primary, ...rest] = systems;
+  return (
+    describeForAgent(primary) +
+    (rest.length ? `\nAlso draw on these design systems where the user asks for it or it fits:\n${rest.map(describeForAgent).join("\n")}` : "")
+  );
+}
+
+/** Newly attached images get described once by a vision model; the description is cached on the message. */
+async function describeNewImages(db: SupabaseClient, msgs: HistoryMessage[], emit: Emit, opts: { deadline: number; signal?: AbortSignal }) {
+  const last = [...msgs].reverse().find((m) => m.role === "user");
+  const images = ((last?.meta?.attachments ?? []) as any[]).filter((a) => a.kind === "image" && a.url && !a.description);
+  if (!last || !images.length) return;
+  for (const [i, a] of images.entries()) {
+    const callId = `img-${i}`;
+    await emit({ type: "tool-call", payload: { callId, name: "view_image", args: { path: a.name } } });
+    try {
+      a.description = await describeImage(a.url, { deadline: opts.deadline - 60_000, signal: opts.signal });
+      await emit({ type: "tool-result", payload: { callId, name: "view_image", path: a.name, image: a.url } });
+    } catch (e) {
+      a.description = "(The image couldn't be read by the vision model.)";
+      await emit({ type: "tool-result", payload: { callId, name: "view_image", path: a.name, error: e instanceof Error ? e.message : String(e) } });
+    }
+  }
+  await db.from("messages").update({ meta: last.meta }).eq("id", last.id);
+}
+
+/** Summarize messages that fell out of the recent window, reusing (and extending) the cached summary. */
+async function summarizeOlder(db: SupabaseClient, projectId: string, settings: ProjectSettings, older: HistoryMessage[], deadline: number) {
+  if (!older.length) return "";
+  const upTo = older[older.length - 1].created_at;
+  const cached = settings.summary;
+  if (cached?.upTo === upTo) return cached.text;
+  const fresh = cached ? older.filter((m) => m.created_at > cached.upTo) : older;
+  const transcript = fresh
+    .map((m) => `${m.role === "user" ? "User" : "Designer"}: ${describeUserMessage(m, false).slice(0, 1500)}`)
+    .join("\n\n");
+  let text = "";
+  try {
+    const r = await chat("glm-flash", {
+      messages: [
+        {
+          role: "system",
+          content:
+            "Summarize a design conversation for the designer who continues it. Keep: what has been made (file names), design decisions (palette, type, layout), the user's preferences and feedback, and anything still open. Bullet points, under 250 words, no preamble.",
+        },
+        { role: "user", content: `${cached ? `Summary so far:\n${cached.text}\n\nNewer messages:\n` : ""}${transcript}` },
+      ],
+      deadline: Math.min(deadline - 60_000, Date.now() + 45_000),
+    });
+    text = removeEmDashes(r.content.trim());
+  } catch {
+    // Keep going without a fresh summary; the older cached one (if any) is still useful.
+  }
+  if (!text) return cached?.text ?? "";
+  await db.from("projects").update({ settings: { ...settings, summary: { upTo, text } } }).eq("id", projectId);
+  return text;
+}
+
 function describeUserMessage(m: { content: string; meta: any }, full: boolean) {
   let text = m.content;
   const meta = m.meta ?? {};
@@ -188,7 +254,13 @@ function describeUserMessage(m: { content: string; meta: any }, full: boolean) {
     text = `(Comment on the <${t.tag}> element${t.path ? ` in ${t.path}` : ""}${t.id ? ` with data-el="${t.id}"` : ""}:\n${String(t.html ?? t.text ?? "").slice(0, 1500)}\n)\n\n${text}`;
   }
   for (const a of meta.attachments ?? []) {
-    text += full && a.content ? `\n\nAttached file "${a.name}":\n${String(a.content).slice(0, 40000)}` : `\n\n(Attached file "${a.name}")`;
+    if (a.kind === "image") {
+      text += `\n\n(Attached image "${a.name}". Use it in the design with <img src="${a.url}"> if it belongs there.${a.description ? ` What it shows: ${a.description}` : ""})`;
+    } else if (a.kind === "folder") {
+      text += full && a.content ? `\n\nAttached local code folder "${a.name}", the UI files of their codebase. Match its visual language:\n${String(a.content).slice(0, 120000)}` : `\n\n(Attached code folder "${a.name}")`;
+    } else {
+      text += full && a.content ? `\n\nAttached file "${a.name}":\n${String(a.content).slice(0, 40000)}` : `\n\n(Attached file "${a.name}")`;
+    }
   }
   return text;
 }
@@ -210,34 +282,41 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   if (!project) throw new Error("project not found");
   await touch({ status: "running" });
 
-  const [dsRes, { data: history }, files, sources] = await Promise.all([
-    project.design_system_id
-      ? db.from("design_systems").select("*").eq("id", project.design_system_id).single()
-      : Promise.resolve({ data: null }),
-    db.from("messages").select("role, content, meta, created_at").eq("project_id", projectId).order("created_at", { ascending: false }).limit(30),
+  const settings = (project.settings ?? {}) as ProjectSettings;
+  const dsIds = [project.design_system_id, ...(settings.designSystems ?? [])].filter((v, i, a): v is string => !!v && a.indexOf(v) === i);
+  const [{ data: dsRows }, { data: history }, files, sources] = await Promise.all([
+    dsIds.length ? db.from("design_systems").select("*").in("id", dsIds) : Promise.resolve({ data: [] as any[] }),
+    db.from("messages").select("id, role, content, meta, created_at").eq("project_id", projectId).order("created_at", { ascending: false }).limit(400),
     listFiles(db, projectId),
     SourceRegistry.load(db, projectId, project.budget),
   ]);
 
   const template = getTemplate(project.template);
+  sources.turnLimit = template.id === "research" ? 14 : 6;
   const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
   const repo = project.codebase ? makeRepoTools(project.codebase) : null;
   const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
 
-  const msgs = (history ?? []).reverse();
-  const lastUserIdx = msgs.map((m) => m.role).lastIndexOf("user");
+  const all = (history ?? []).reverse();
+  await describeNewImages(db, all, emit, { deadline, signal: opts.signal });
+  // Long chats: the recent messages go in verbatim, everything older as a cached summary.
+  const recent = all.slice(-KEEP_RECENT);
+  const summary = await summarizeOlder(db, projectId, settings, all.slice(0, -KEEP_RECENT), deadline);
+  const systems = dsIds.map((id) => (dsRows ?? []).find((r: any) => r.id === id)).filter(Boolean).map((r: any) => fromRow(r));
+  const lastUserIdx = recent.map((m) => m.role).lastIndexOf("user");
   const convo: ChatMessage[] = [
     {
       role: "system",
-      content: systemPrompt({
-        templateBrief: `${template.label}. ${template.brief}`,
-        designSystem: describeForAgent(dsRes.data ? fromRow(dsRes.data) : null),
-        codebase: project.codebase,
-        research: template.id === "research",
-      }),
+      content:
+        systemPrompt({
+          templateBrief: `${template.label}. ${template.brief}`,
+          designSystem: describeSystems(systems),
+          codebase: project.codebase,
+          research: template.id === "research",
+        }) + (summary ? `\n\n## Earlier in this conversation (summarized)\n${summary}` : ""),
     },
   ];
-  msgs.forEach((m, i) => {
+  recent.forEach((m, i) => {
     if (m.role === "user") convo.push({ role: "user", content: describeUserMessage(m, i === lastUserIdx) });
     else if (m.role === "assistant" && m.content) convo.push({ role: "assistant", content: m.content });
   });

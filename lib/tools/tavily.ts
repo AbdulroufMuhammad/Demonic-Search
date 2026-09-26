@@ -22,6 +22,9 @@ async function tv(path: string, body: Record<string, unknown>) {
 export class SourceRegistry {
   sources = new Map<string, Source>();
   searchesLeft: number;
+  /** Searches + fetches allowed in the current turn; keeps the agent from researching instead of designing. */
+  turnLimit = 6;
+  turnUsed = 0;
 
   private constructor(private db: SupabaseClient, private projectId: string, searchesLeft: number) {
     this.searchesLeft = searchesLeft;
@@ -36,7 +39,10 @@ export class SourceRegistry {
 
   private spend() {
     if (this.searchesLeft <= 0) throw new Error("the search budget for this project is used up; continue with what you have");
+    if (this.turnUsed >= this.turnLimit)
+      throw new Error(`that's this turn's research allowance (${this.turnLimit}); write with what you have now`);
     this.searchesLeft -= 1;
+    this.turnUsed += 1;
   }
 
   private async register(url: string, title?: string, text?: string) {
