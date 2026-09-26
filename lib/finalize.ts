@@ -43,7 +43,9 @@ export function removeEmDashes(text: string) {
   EM_DASH.lastIndex = 0;
   return text
     .replace(/(\d)\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*(\d)/gi, "$1–$2")
-    .replace(/(^|[>\n])\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*/gi, "$1")
+    // A dash opening a line ("— Author") just goes; one with a space before it continues a sentence
+    // (often right after <strong>…</strong>, where the text node starts " — from"), so it becomes ", ".
+    .replace(/(^|[>\n])(?:—|&mdash;|&#8212;|&#x2014;)\s*/gi, "$1")
     .replace(/\s*(?:—|&mdash;|&#8212;|&#x2014;)\s*/gi, ", ");
 }
 
