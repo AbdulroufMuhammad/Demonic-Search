@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Question, Row } from "@/lib/thread";
+import type { Row } from "@/lib/thread";
+import { answersMessage, formatAnswer, type Answer, type Question } from "@/lib/questions";
 import Markdown from "@/components/ui/Markdown";
 import { AttachmentChips } from "@/components/ui/Attachments";
 import { IconBolt, IconSparkle, IconChevronDown, IconChevronRight, IconComment, IconExternal, IconFile, IconThumbDown, IconThumbUp } from "@/components/ui/Icons";
@@ -10,18 +11,24 @@ function UserMessage({ row }: { row: Extract<Row, { kind: "user" }> }) {
   const meta = row.meta ?? {};
   const anchor = `msg-${row.key.slice(1)}`;
   if (meta.answers) {
+    // "Question\n→ answer" blocks (older messages: "id: answer" lines).
+    const blocks = row.text.includes("\n→ ")
+      ? row.text.split(/\n{2,}/).map((b) => {
+          const [q, ...a] = b.split("\n→ ");
+          return { q, a: a.join(" ") };
+        })
+      : row.text.split("\n").map((line) => {
+          const at = line.indexOf(": ");
+          return at > 0 ? { q: line.slice(0, at), a: line.slice(at + 2) } : { q: "", a: line };
+        });
     return (
       <div className="msg-user brief" id={anchor}>
-        {row.text.split("\n").map((line, i) => {
-          const at = line.indexOf(": ");
-          return at > 0 ? (
-            <div key={i}>
-              <strong>{line.slice(0, at)}:</strong> {line.slice(at + 2)}
-            </div>
-          ) : (
-            <div key={i}>{line}</div>
-          );
-        })}
+        {blocks.map((b, i) => (
+          <div key={i} className="brief-item">
+            {b.q && <div className="brief-q">{b.q}</div>}
+            <div className="brief-a">{b.a}</div>
+          </div>
+        ))}
       </div>
     );
   }
@@ -121,10 +128,109 @@ function LiveThinking({ reasoning, text, open, setOpen }: { reasoning: string; t
   );
 }
 
+/** One field of the clarifying form, rendered by its type. */
+function QuestionField({ q, value, onChange }: { q: Question; value: Answer; onChange: (v: Answer) => void }) {
+  const [other, setOther] = useState("");
+  switch (q.type) {
+    case "single":
+    case "multi": {
+      const multi = q.type === "multi";
+      const picked = multi ? (Array.isArray(value) ? value : []) : typeof value === "string" ? value : "";
+      const isOn = (o: string) => (multi ? (picked as string[]).includes(o) : picked === o);
+      const toggle = (o: string) => {
+        if (multi) {
+          const list = picked as string[];
+          onChange(list.includes(o) ? list.filter((x) => x !== o) : [...list, o]);
+        } else {
+          setOther("");
+          onChange(picked === o ? null : o);
+        }
+      };
+      const typedOther = multi ? (picked as string[]).find((x) => !q.options.includes(x)) : !q.options.includes(picked as string) ? (picked as string) : "";
+      return (
+        <>
+          <div className="question-options" role={multi ? "group" : "radiogroup"}>
+            {q.options.map((o) => (
+              <button key={o} type="button" role={multi ? "checkbox" : "radio"} aria-checked={isOn(o)} className={`opt${multi ? " check" : ""}${isOn(o) ? " on" : ""}`} onClick={() => toggle(o)}>
+                {multi && <span className="opt-box" aria-hidden>{isOn(o) ? "✓" : ""}</span>}
+                {o}
+              </button>
+            ))}
+          </div>
+          {q.other && (
+            <input
+              className="question-other"
+              placeholder={multi ? "Anything else? Type it here" : "Or type your own…"}
+              value={other || typedOther || ""}
+              onChange={(e) => {
+                const t = e.target.value;
+                setOther(t);
+                if (multi) {
+                  const known = (picked as string[]).filter((x) => q.options.includes(x));
+                  onChange(t.trim() ? [...known, t] : known);
+                } else onChange(t.trim() ? t : null);
+              }}
+            />
+          )}
+        </>
+      );
+    }
+    case "select":
+      return (
+        <select className="question-input" value={typeof value === "string" ? value : ""} onChange={(e) => onChange(e.target.value || null)}>
+          <option value="">Choose…</option>
+          {q.options.map((o) => (
+            <option key={o} value={o}>
+              {o}
+            </option>
+          ))}
+        </select>
+      );
+    case "long":
+      return <textarea className="question-input long" rows={3} placeholder={q.placeholder ?? "Type your answer…"} value={typeof value === "string" ? value : ""} onChange={(e) => onChange(e.target.value)} />;
+    case "number":
+      return (
+        <input
+          className="question-input short"
+          type="number"
+          min={q.min}
+          max={q.max}
+          step={q.step}
+          placeholder={q.placeholder ?? ""}
+          value={typeof value === "number" ? value : ""}
+          onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+        />
+      );
+    case "slider": {
+      const min = q.min ?? 0;
+      const max = q.max ?? 10;
+      const v = typeof value === "number" ? value : null;
+      return (
+        <div className="question-slider">
+          <span className="muted">{min}</span>
+          <input type="range" min={min} max={max} step={q.step ?? 1} value={v ?? Math.round((min + max) / 2)} onChange={(e) => onChange(Number(e.target.value))} className={v == null ? "unset" : ""} />
+          <span className="muted">{max}</span>
+          <span className="question-slider-value">{v ?? "Your call"}</span>
+        </div>
+      );
+    }
+    case "toggle":
+      return (
+        <div className="question-options" role="radiogroup">
+          {["yes", "no"].map((o) => (
+            <button key={o} type="button" role="radio" aria-checked={value === o} className={`opt${value === o ? " on" : ""}`} onClick={() => onChange(value === o ? null : o)}>
+              {o === "yes" ? "Yes" : "No"}
+            </button>
+          ))}
+        </div>
+      );
+    default:
+      return <input className="question-input" placeholder={q.placeholder ?? "Type your answer…"} value={typeof value === "string" ? value : ""} onChange={(e) => onChange(e.target.value)} />;
+  }
+}
+
 function QuestionsCard({ row, disabled, onAnswer }: { row: Extract<Row, { kind: "questions" }>; disabled: boolean; onAnswer: (text: string, answers: Record<string, string>) => void }) {
-  const [picked, setPicked] = useState<Record<string, string>>({});
-  const [other, setOther] = useState<Record<string, string>>({});
-  const answerFor = (q: Question) => other[q.id]?.trim() || picked[q.id] || "";
+  const [answers, setAnswers] = useState<Record<string, Answer>>(() => Object.fromEntries(row.questions.map((q) => [q.id, (q.default as Answer) ?? null])));
 
   if (row.answered) {
     return (
@@ -138,45 +244,44 @@ function QuestionsCard({ row, disabled, onAnswer }: { row: Extract<Row, { kind: 
       </div>
     );
   }
+  const answeredCount = row.questions.filter((q) => formatAnswer(q, answers[q.id] ?? null) !== "Your call").length;
   function submit(skip = false) {
-    const answers: Record<string, string> = {};
-    for (const q of row.questions) answers[q.id] = skip ? "Your call" : answerFor(q) || "Your call";
-    const text = row.questions.map((q) => `${q.id}: ${answers[q.id]}`).join("\n");
-    onAnswer(text, answers);
+    const out: Record<string, string> = {};
+    for (const q of row.questions) out[q.id] = skip ? "Your call" : formatAnswer(q, answers[q.id] ?? null);
+    onAnswer(answersMessage(row.questions, answers, skip), out);
   }
   return (
-    <div className="questions">
+    <form
+      className="questions"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!disabled) submit();
+      }}
+    >
       {row.intro && <p className="questions-intro">{row.intro}</p>}
-      {row.questions.map((q) => (
+      {row.questions.map((q, i) => (
         <div key={q.id} className="question">
-          <div className="question-label">{q.question}</div>
-          <div className="question-options">
-            {q.options.map((o) => (
-              <button
-                key={o}
-                type="button"
-                className={`opt${picked[q.id] === o && !other[q.id]?.trim() ? " on" : ""}`}
-                onClick={() => {
-                  setPicked((p) => ({ ...p, [q.id]: p[q.id] === o ? "" : o }));
-                  setOther((p) => ({ ...p, [q.id]: "" }));
-                }}
-              >
-                {o}
-              </button>
-            ))}
+          <div className="question-label">
+            <span className="question-num">{i + 1}</span>
+            {q.question}
+            {q.type === "multi" && <span className="question-kind">Pick any</span>}
           </div>
-          <input className="question-other" placeholder="Or type your own…" value={other[q.id] ?? ""} onChange={(e) => setOther((p) => ({ ...p, [q.id]: e.target.value }))} />
+          {q.help && <div className="question-help">{q.help}</div>}
+          <QuestionField q={q} value={answers[q.id] ?? null} onChange={(v) => setAnswers((a) => ({ ...a, [q.id]: v }))} />
         </div>
       ))}
       <div className="questions-actions">
+        <span className="questions-progress">
+          {answeredCount} of {row.questions.length} answered
+        </span>
         <button type="button" className="btn-ghost" disabled={disabled} onClick={() => submit(true)}>
           Skip, use your judgement
         </button>
-        <button type="button" className="btn-accent" disabled={disabled} onClick={() => submit()}>
+        <button type="submit" className="btn-accent" disabled={disabled}>
           Continue
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 

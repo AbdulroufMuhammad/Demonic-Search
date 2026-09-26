@@ -264,12 +264,12 @@ export function ShareDialog({
   }
 
   /** PNG/PPTX render server-side and can take a few seconds, so show progress and surface errors. */
-  async function download(format: "png" | "pptx") {
+  async function download(format: "png" | "pptx", mode?: "image") {
     if (!path) return;
-    setBusy(format);
+    setBusy(mode ? `${format}-${mode}` : format);
     setError(null);
     try {
-      const res = await fetch(exportUrl(format));
+      const res = await fetch(exportUrl(format) + (mode ? `&mode=${mode}` : ""));
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `Export failed (${res.status})`);
       const url = URL.createObjectURL(await res.blob());
       const a = Object.assign(document.createElement("a"), { href: url, download: `${path.replace(/\.html$/i, "")}.${format}` });
@@ -323,14 +323,22 @@ export function ShareDialog({
             {busy === "png" ? <span className="spinner" /> : <IconDownload size={14} />} PNG
           </button>
           {slides > 0 && (
-            <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("pptx")}>
+            <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("pptx")} title="Editable text in PowerPoint, Keynote and Google Slides">
               {busy === "pptx" ? <span className="spinner" /> : <IconDownload size={14} />} PowerPoint
+            </button>
+          )}
+          {slides > 0 && (
+            <button type="button" className="btn-secondary" disabled={!path || !!busy} onClick={() => download("pptx", "image")} title="Each slide as a picture: looks exactly like the design, but text isn't editable">
+              {busy === "pptx-image" ? <span className="spinner" /> : <IconDownload size={14} />} PowerPoint (exact look)
             </button>
           )}
           <a className={`btn-secondary${path ? "" : " disabled"}`} href={path ? exportUrl("html") : undefined}>
             <IconDownload size={14} /> HTML
           </a>
         </div>
+        {slides > 0 && (
+          <p className="modal-note tight">PowerPoint files open in PowerPoint, Keynote and Google Slides. The text is editable; fonts you don't have installed are swapped for similar ones.</p>
+        )}
         {error && <p className="form-error">{error}</p>}
         <div className="modal-section">Hand off to Claude Code</div>
         <p className="modal-note tight">A ready-to-paste prompt with the full design, to implement it in {codebase ?? "your codebase"}.</p>

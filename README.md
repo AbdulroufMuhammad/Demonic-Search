@@ -30,7 +30,9 @@ its URL, and the app talks to Supabase through the service-role client.
   message. Tools: `write_file` / `str_replace` / `read_file` (versioned HTML
   files), `web_search` / `web_fetch` (Tavily, cited by short source IDs),
   `repo_tree` / `repo_read` (the connected GitHub codebase), and
-  `ask_questions` (a short brief rendered as a form). It narrates each step,
+  `ask_questions` (a clarifying form of up to 8 questions, each with the field
+  that fits: single or multiple choice, dropdown, short or long text, number,
+  slider or yes/no; `lib/questions.ts`). It narrates each step,
   which the chat shows as activity rows, and the file being written streams to
   the canvas as it's generated.
 - **Design systems** — when a project makes a design system (the Design system
@@ -54,8 +56,11 @@ its URL, and the app talks to Supabase through the service-role client.
 - **Comments** — each comment stays pinned to its element (numbered pins in
   Comment mode) with the agent's reply, until you resolve it.
 - **Present & export** — Present slides shows one slide at a time full screen
-  with speaker notes; Share exports PDF (print), PNG, PowerPoint (one image per
-  slide, with notes) and HTML, and copies a Claude Code handoff prompt.
+  with speaker notes; Share exports PDF (print), PNG, PowerPoint and HTML, and
+  copies a Claude Code handoff prompt. PowerPoint (`lib/pptxExport.ts`) keeps
+  each slide's look as a background image with real, editable text boxes on
+  top (fonts, sizes, colors, bold/italic, bullets, speaker notes); "exact look"
+  exports each slide as one picture instead.
 - **Long chats** — the last 12 messages go to the model verbatim; older ones as
   a cached summary. Each turn has a research allowance, and models fall back
   GLM → GLM Flash → DeepSeek, skipping a provider whose key was rejected.

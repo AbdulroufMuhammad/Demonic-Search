@@ -1,4 +1,5 @@
 import type { StoredEvent, StoredMessage } from "@/lib/projectData";
+import { cleanQuestions, type Question } from "@/lib/questions";
 
 export type ToolRow = {
   callId: string;
@@ -10,7 +11,7 @@ export type ToolRow = {
   image?: string | null;
   findings?: string[];
 };
-export type Question = { id: string; question: string; options: string[] };
+export type { Question };
 
 export type Row =
   | { kind: "user"; key: string; text: string; meta: any }
@@ -127,7 +128,7 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
       }
     } else if (e.type === "questions") {
       group = null;
-      rows.push({ kind: "questions", key: "e" + e.id, intro: String(p.intro ?? ""), questions: p.questions ?? [], answered: false });
+      rows.push({ kind: "questions", key: "e" + e.id, intro: String(p.intro ?? ""), questions: cleanQuestions(p.questions), answered: false });
     } else if (e.type === "error") {
       rows.push({ kind: "error", key: "e" + e.id, text: String(p.message ?? "Something went wrong") });
     } else if (e.type === "say") {
@@ -136,11 +137,14 @@ export function buildThread(messages: StoredMessage[], events: StoredEvent[], ru
     }
   }
 
-  let sawUser = false;
+  // A form stays open until it's answered or the agent moves on; a plain follow-up message ("call it Koroba") doesn't close it.
+  let movedOn = false;
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
-    if (r.kind === "user") sawUser = true;
-    if (r.kind === "questions") r.answered = sawUser;
+    if (r.kind === "questions") {
+      r.answered = movedOn;
+      movedOn = true;
+    } else if ((r.kind === "user" && r.meta?.answers) || r.kind === "reply" || r.kind === "file") movedOn = true;
   }
   for (const r of rows) {
     if (r.kind !== "activity") continue;

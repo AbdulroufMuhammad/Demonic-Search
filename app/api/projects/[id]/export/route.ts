@@ -1,11 +1,10 @@
 import { getProject, notFoundResponse } from "@/lib/access";
 import { readFile } from "@/lib/projectData";
 import { launchBrowser, openDesign } from "@/lib/tools/browser";
+import { buildPptx } from "@/lib/pptxExport";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
-
-const SLIDES = ".slide, [data-slide]";
 
 function attachment(name: string, ext: string) {
   const base = name.replace(/\.html$/i, "").replace(/["\\\r\n]/g, "") || "design";
@@ -13,8 +12,9 @@ function attachment(name: string, ext: string) {
 }
 
 /**
- * Downloads: standalone HTML; PNG (full-page render); PPTX for slide decks,
- * one full-bleed image per slide with its speaker notes. PDF export happens
+ * Downloads: standalone HTML; PNG (full-page render); PPTX for slide decks
+ * with speaker notes, editable text by default or one image per slide with
+ * mode=image (lib/pptxExport.ts). PDF export happens
  * in the browser's print dialog instead (lib/print.ts).
  */
 export async function GET(req: Request, { params }: { params: { id: string } }) {
@@ -42,27 +42,8 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     }
 
     const page = await openDesign(browser, file.content, { width: 1920, height: 1080 });
-    const slides = page.locator(SLIDES);
-    const count = Math.min(await slides.count(), 80);
-    if (!count) return Response.json({ error: "No slides found. PPTX export works for slide decks (elements with class “slide”)." }, { status: 400 });
-
-    // Decks often scale themselves to fit the window; undo that so every slide is captured at full resolution.
-    await page.evaluate(`document.querySelectorAll(${JSON.stringify(SLIDES)}).forEach((el) => {
-      for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) a.style.setProperty("transform", "none", "important");
-    })`);
-    const PptxGenJS = (await import("pptxgenjs")).default;
-    const pptx = new PptxGenJS();
-    pptx.layout = "LAYOUT_WIDE";
-    pptx.title = file.path.replace(/\.html$/i, "");
-    for (let i = 0; i < count; i++) {
-      const el = slides.nth(i);
-      const shot = await el.screenshot({ type: "png" });
-      const notes = ((await el.getAttribute("data-notes")) ?? (await el.locator("aside.notes, .notes").first().innerText().catch(() => "")) ?? "").trim();
-      const slide = pptx.addSlide();
-      slide.addImage({ data: `image/png;base64,${shot.toString("base64")}`, x: 0, y: 0, w: 13.333, h: 7.5 });
-      if (notes) slide.addNotes(notes);
-    }
-    const buf = (await pptx.write({ outputType: "nodebuffer" })) as Buffer;
+    const buf = await buildPptx(page, file.path.replace(/\.html$/i, ""), sp.get("mode") === "image" ? "image" : "editable");
+    if (!buf) return Response.json({ error: "No slides found. PowerPoint export works for slide decks (elements with class “slide”)." }, { status: 400 });
     return new Response(new Uint8Array(buf), {
       headers: {
         "Content-Type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",

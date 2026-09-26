@@ -8,6 +8,7 @@ import { finalizeArtifact, removeEmDashes } from "@/lib/finalize";
 import { checkDesign, type CheckResult } from "@/lib/tools/visualCheck";
 import { getTemplate } from "@/lib/templates";
 import { extractDesignSystem } from "@/lib/extractDesignSystem";
+import { ASK_PARAMETERS, cleanQuestions } from "@/lib/questions";
 import { describeForAgent, fromRow, type DesignSystem } from "@/lib/designSystems";
 import { describeImage } from "@/lib/tools/vision";
 import { listFiles, readFile } from "@/lib/projectData";
@@ -18,6 +19,8 @@ import { listFiles, readFile } from "@/lib/projectData";
 const TURN_BUDGET_MS = Number(process.env.TURN_BUDGET_MS ?? 270_000);
 const STOP_MARGIN_MS = 20_000;
 const MAX_STEPS = 30;
+// Well inside STALE_RUN_MS (lib/projectData.ts), after which a silent run counts as dead.
+const HEARTBEAT_MS = 10_000;
 const MAX_ACTIVE_FILE_CHARS = 60_000;
 // A browser check needs this much turn time left: ~35s to render, ~45s to review, plus the fix that follows.
 const CHECK_MIN_MS = 90_000;
@@ -27,26 +30,8 @@ const ASK_SCHEMA: ToolSchema = {
   function: {
     name: "ask_questions",
     description:
-      "Ask the user a short brief (1–4 questions, each with 2–5 suggested answers) before designing. Ends your turn; their answers arrive as the next message.",
-    parameters: {
-      type: "object",
-      properties: {
-        intro: { type: "string", description: "One short sentence introducing the questions" },
-        questions: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "short key, e.g. audience" },
-              question: { type: "string" },
-              options: { type: "array", items: { type: "string" } },
-            },
-            required: ["id", "question", "options"],
-          },
-        },
-      },
-      required: ["questions"],
-    },
+      "Ask the user a clarifying form before designing: 1–8 questions, each with the field type that fits it (single choice, multiple choice checkboxes, dropdown, short or long text, number, slider, yes/no toggle). Ends your turn; their answers arrive as the next message.",
+    parameters: ASK_PARAMETERS,
   },
 };
 
@@ -156,7 +141,7 @@ function systemPrompt(opts: { templateBrief: string; designSystem: string; codeb
 
 ## How you work
 - Before each batch of tool calls, write one short line (under 12 words) saying what you're doing, as a present participle, e.g. "Picking a font pairing and accent color." It appears as a progress row.
-- If a brand-new request leaves the important choices open (audience, content, tone, format), you may call ask_questions once with 1–4 quick questions and suggested answers instead of guessing. If the request is already specific enough, just start designing. Never ask twice in a row.
+- If a request leaves important choices open (what it's for, audience, content, features or sections needed, tone, format), call ask_questions with a proper form instead of guessing: ask everything you actually need in one go (usually 3–6 questions), each with the field type that fits. Use single for one-of choices, multi (checkboxes) for picking several, like features, sections or pages needed, select for a long list, text for names and specifics, long for descriptions, number or slider for quantities (e.g. how many screens or slides), and toggle for yes/no. Give concrete options, not vague ones, and preselect a sensible default where one is obvious. If the request is already specific enough, just start designing. Never ask twice in a row; once answered, design with what you have and decide anything left open yourself.
 - Every file you write is checked automatically in a real browser before your reply reaches the user, and any real problems come back to you to fix. You can also call check_design yourself mid-way. When problems come back, fix them directly; don't ask the user.
 - If the user asks you to create, extract or define a design system, make a visual spec file for it (palette with roles and hex values, type scale, spacing/radius, core components in their states) and call save_design_system so it becomes reusable.
 - When the user comments on a specific element, you get its HTML; change that element and leave the rest alone.
@@ -183,6 +168,16 @@ ${opts.codebase ? `\nConnected codebase: ${opts.codebase}. Before designing, use
 }
 
 /** Decode the JSON string value of `key` from a tool call's partial argument text. */
+function validArgs(args: string) {
+  try {
+    JSON.parse(args || "{}");
+    return args || "{}";
+  } catch {
+    const path = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(args)?.[1];
+    return JSON.stringify(path ? { path: path.replace(/\\"/g, '"'), cut_off: true } : { cut_off: true });
+  }
+}
+
 function partialJsonString(args: string, key: string): string | null {
   const m = new RegExp(`"${key}"\\s*:\\s*"`).exec(args);
   if (!m) return null;
@@ -344,444 +339,452 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
   if (!project) throw new Error("project not found");
   currentModel = modelKeyFor(project.model_profile);
   await touch({ status: "running" });
-
-  const settings = (project.settings ?? {}) as ProjectSettings;
-  const dsIds = [project.design_system_id, ...(settings.designSystems ?? [])].filter((v, i, a): v is string => !!v && a.indexOf(v) === i);
-  const [{ data: dsRows }, { data: history }, files, sources] = await Promise.all([
-    dsIds.length ? db.from("design_systems").select("*").in("id", dsIds) : Promise.resolve({ data: [] as any[] }),
-    db.from("messages").select("id, role, content, meta, created_at").eq("project_id", projectId).order("created_at", { ascending: false }).limit(400),
-    listFiles(db, projectId),
-    SourceRegistry.load(db, projectId, project.budget),
-  ]);
-
-  const template = getTemplate(project.template);
-  sources.turnLimit = template.id === "research" ? 14 : 6;
-  const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
-  const repo = project.codebase ? makeRepoTools(project.codebase) : null;
-  const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
-
-  const all = (history ?? []).reverse();
-  await describeNewImages(db, all, emit, { deadline, signal });
-  // Long chats: the recent messages go in verbatim, everything older as a cached summary.
-  const recent = all.slice(-KEEP_RECENT);
-  const summary = await summarizeOlder(db, projectId, settings, all.slice(0, -KEEP_RECENT), deadline);
-  const systems = dsIds.map((id) => (dsRows ?? []).find((r: any) => r.id === id)).filter(Boolean).map((r: any) => fromRow(r));
-  const lastUserIdx = recent.map((m) => m.role).lastIndexOf("user");
-  const convo: ChatMessage[] = [
-    {
-      role: "system",
-      content:
-        systemPrompt({
-          templateBrief: `${template.label}. ${template.brief}`,
-          designSystem: describeSystems(systems),
-          codebase: project.codebase,
-          research: template.id === "research",
-        }) + (summary ? `\n\n## Earlier in this conversation (summarized)\n${summary}` : ""),
-    },
-  ];
-  recent.forEach((m, i) => {
-    if (m.role === "user") convo.push({ role: "user", content: describeUserMessage(m, i === lastUserIdx) });
-    else if (m.role === "assistant" && m.content) convo.push({ role: "assistant", content: m.content });
-  });
-
-  // Current state of the canvas, so small edits don't need a read_file round trip first.
-  const active = files.find((f) => f.path === opts.activeFile) ?? files[0];
-  let context = files.length
-    ? `\n\n---\nFiles in this project: ${files.map((f) => `"${f.path}" (v${f.version})`).join(", ")}.`
-    : "\n\n---\nThe project has no files yet.";
-  if (active) {
-    const cur = await readFile(db, projectId, active.path);
-    if (cur && cur.content.length <= MAX_ACTIVE_FILE_CHARS) {
-      context += `\nThe user is looking at "${active.path}". Its current contents (v${cur.version}):\n\`\`\`html\n${cur.content}\n\`\`\``;
-    } else if (cur) {
-      context += `\nThe user is looking at "${active.path}" (too long to include, so read_file it before editing).`;
-    }
-  }
-  if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
-  if (settings.pendingCheck && !settings.partial) {
-    context += `\n\n"${settings.pendingCheck}" is written; it only still needs its browser check, which runs automatically once you reply. Unless something else is unfinished, just reply in one sentence.`;
-  }
-  if (settings.partial) {
-    const p = settings.partial;
-    context += `\n\nThe time limit cut you off while you were writing "${p.path}". The first ${p.content.length} characters are saved. Don't rewrite them: call append_file with path "${p.path}" and ONLY the rest of the document, continuing exactly where this leaves off:\n\`\`\`html\n…${p.content.slice(-1500)}\n\`\`\``;
-  }
-  const lastUser = [...convo].reverse().find((m) => m.role === "user");
-  if (lastUser) lastUser.content = `${lastUser.content ?? ""}${context}`;
-  else convo.push({ role: "user", content: `Continue.${context}` });
-
-  const touched = new Map<string, { version: number; created: boolean }>();
-  const checks = new Map<string, number>();
-  // The last file written this turn that hasn't been through a browser check yet.
-  let unchecked: string | null = settings.pendingCheck ?? null;
-  let autoChecks = 0;
-  // A request for a design system isn't done until it's saved to the picker.
-  const latestRequest = [...recent].reverse().find((m) => m.role === "user")?.content ?? "";
-  const wantsDesignSystem =
-    template.id === "designsystem" ||
-    !!settings.savedDesignSystemId ||
-    // "make a motion design system", "turn this into a design system"; not "a landing page using my design system".
-    /\b(create|make|build|generate|extract|define|set up|into)\s+(me\s+)?(a|an|the|our|my|new)?\s*([\w,'-]+\s+){0,3}design[- ]system/i.test(latestRequest);
-  let dsSaved = false;
-  let dsNudged = false;
-  // The spec file this turn wrote that the saved design system should match, if any.
-  const dsSpecFile = () => {
-    if (!wantsDesignSystem || dsSaved || !touched.size) return null;
-    const known = settings.designSystemFile;
-    return known ? (touched.has(known) ? known : null) : [...touched.keys()].pop()!;
-  };
-  // The model didn't save the design system it made: read the tokens out of the spec file itself.
-  const autoSaveDesignSystem = async (path: string) => {
-    const callId = `auto-save-ds-${Date.now()}`;
-    try {
-      const { content } = await fileTools.read_file({ path });
-      const tokens = extractDesignSystem(content, project.title ?? latestRequest);
-      if (!tokens) return;
-      await emit({ type: "tool-call", payload: { callId, name: "save_design_system", args: { name: tokens.name } } });
-      settings.designSystemFile = path;
-      const saved = await saveDesignSystem(db, projectId, settings, tokens);
-      dsSaved = true;
-      await emit({ type: "tool-result", payload: { callId, name: "save_design_system", dsName: saved.name, system: saved } });
-    } catch (e) {
-      await emit({ type: "tool-result", payload: { callId, name: "save_design_system", error: e instanceof Error ? e.message : String(e) } });
-    }
-  };
-  const checkDeferred = !!settings.pendingCheck;
-  let badCalls = 0;
-  let status: "ready" | "paused" = "ready";
-  // A long generation sends no events for minutes; the heartbeat tells other tabs (and resume logic) this turn is alive.
-  let lastBeat = Date.now();
-  const beat = () => {
-    if (Date.now() - lastBeat < 15_000) return;
-    lastBeat = Date.now();
+  // The heartbeat tells other tabs (and resume logic) this turn is alive. It runs on a timer, not on streamed tokens:
+  // a model can sit silent for a minute before its first token, and a turn that looks dead gets taken over.
+  const heartbeat = setInterval(() => {
     void touch();
     void stillOwner();
-  };
-  // The write_file call being streamed, so a turn cut off by the time limit can hand its partial file to the next round.
-  let writing: { path: string; args: string } | null = null;
-  const savePartial = async () => {
-    const content = writing ? partialJsonString(writing.args, "content") : null;
-    if (!writing?.path || !content || content.length < 400) return;
-    settings.partial = { path: writing.path, content };
-    await db.from("projects").update({ settings }).eq("id", projectId);
-  };
-
-  const requestText = () => {
-    const latest = [...recent].reverse().find((m) => m.role === "user" && !m.meta?.answers)?.content ?? "";
-    return `${project.goal ?? ""}${latest && latest !== project.goal ? `\nLatest request: ${latest}` : ""}`;
-  };
-  /** Render a file in a browser and review it; shared by the agent's own check_design calls and the automatic check. */
-  const runCheck = async (path: string) => {
-    const f = await fileTools.read_file({ path });
-    checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
-    if (unchecked === f.path) unchecked = null;
-    const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: requestText() });
-    const auto = automatedFindings(c);
-    const serious = c.issues.filter((i) => i.severity !== "low");
-    const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
-    const needsFix = auto.length > 0 || serious.length > 0;
-    return {
-      path: f.path,
-      needsFix,
-      problems: [...auto, ...visual.filter((v) => !v.startsWith("Low"))],
-      result: {
-        path: f.path,
-        version: f.version,
-        automated_findings: auto,
-        visual_issues: c.issues,
-        overall: c.overall,
-        note: needsFix ? "Fix the automated findings and the high/medium visual issues." : "Looks good; no fixes needed.",
-      },
-      summary: { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length },
-    };
-  };
-
-  const finish = async (reply: string | null) => {
-    if (reply) {
-      reply = removeEmDashes(reply);
-      const meta = { files: [...touched].map(([path, v]) => ({ path, ...v })) };
-      const { data: message } = await db
-        .from("messages")
-        .insert({ project_id: projectId, role: "assistant", content: reply, meta, created_at: new Date().toISOString() })
-        .select("id, role, content, meta, created_at")
-        .single();
-      if (message) await emit({ type: "message", payload: { message } });
-    }
-  };
-
+  }, HEARTBEAT_MS);
+  let settled = false;
   try {
-    for (let step = 0; step < MAX_STEPS; step++) {
-      if (signal.aborted) {
-        await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
-        break;
-      }
-      if (deadline - Date.now() < STOP_MARGIN_MS) {
-        status = "paused";
-        await emit({ type: "continue", payload: {} });
-        break;
-      }
-      if (!(await stillOwner())) {
-        await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
-        break;
-      }
 
-      const drafts = new Map<number, { path: string; sent: number; at: number }>();
-      const stepStart = Date.now();
-      let r;
+    const settings = (project.settings ?? {}) as ProjectSettings;
+    const dsIds = [project.design_system_id, ...(settings.designSystems ?? [])].filter((v, i, a): v is string => !!v && a.indexOf(v) === i);
+    const [{ data: dsRows }, { data: history }, files, sources] = await Promise.all([
+      dsIds.length ? db.from("design_systems").select("*").in("id", dsIds) : Promise.resolve({ data: [] as any[] }),
+      db.from("messages").select("id, role, content, meta, created_at").eq("project_id", projectId).order("created_at", { ascending: false }).limit(400),
+      listFiles(db, projectId),
+      SourceRegistry.load(db, projectId, project.budget),
+    ]);
+
+    const template = getTemplate(project.template);
+    sources.turnLimit = template.id === "research" ? 14 : 6;
+    const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
+    const repo = project.codebase ? makeRepoTools(project.codebase) : null;
+    const tools: ToolSchema[] = [...FILE_TOOL_SCHEMAS, ...WEB_TOOL_SCHEMAS, ...(repo ? REPO_TOOL_SCHEMAS : []), APPEND_SCHEMA, CHECK_SCHEMA, SAVE_DS_SCHEMA, ASK_SCHEMA];
+
+    const all = (history ?? []).reverse();
+    await describeNewImages(db, all, emit, { deadline, signal });
+    // Long chats: the recent messages go in verbatim, everything older as a cached summary.
+    const recent = all.slice(-KEEP_RECENT);
+    const summary = await summarizeOlder(db, projectId, settings, all.slice(0, -KEEP_RECENT), deadline);
+    const systems = dsIds.map((id) => (dsRows ?? []).find((r: any) => r.id === id)).filter(Boolean).map((r: any) => fromRow(r));
+    const lastUserIdx = recent.map((m) => m.role).lastIndexOf("user");
+    const convo: ChatMessage[] = [
+      {
+        role: "system",
+        content:
+          systemPrompt({
+            templateBrief: `${template.label}. ${template.brief}`,
+            designSystem: describeSystems(systems),
+            codebase: project.codebase,
+            research: template.id === "research",
+          }) + (summary ? `\n\n## Earlier in this conversation (summarized)\n${summary}` : ""),
+      },
+    ];
+    recent.forEach((m, i) => {
+      if (m.role === "user") convo.push({ role: "user", content: describeUserMessage(m, i === lastUserIdx) });
+      else if (m.role === "assistant" && m.content) convo.push({ role: "assistant", content: m.content });
+    });
+
+    // Current state of the canvas, so small edits don't need a read_file round trip first.
+    const active = files.find((f) => f.path === opts.activeFile) ?? files[0];
+    let context = files.length
+      ? `\n\n---\nFiles in this project: ${files.map((f) => `"${f.path}" (v${f.version})`).join(", ")}.`
+      : "\n\n---\nThe project has no files yet.";
+    if (active) {
+      const cur = await readFile(db, projectId, active.path);
+      if (cur && cur.content.length <= MAX_ACTIVE_FILE_CHARS) {
+        context += `\nThe user is looking at "${active.path}". Its current contents (v${cur.version}):\n\`\`\`html\n${cur.content}\n\`\`\``;
+      } else if (cur) {
+        context += `\nThe user is looking at "${active.path}" (too long to include, so read_file it before editing).`;
+      }
+    }
+    if (opts.resume) context += "\n\nYou were interrupted by a time limit partway through this request. Continue from where the files are now; don't start over.";
+    if (settings.pendingCheck && !settings.partial) {
+      context += `\n\n"${settings.pendingCheck}" is written; it only still needs its browser check, which runs automatically once you reply. Unless something else is unfinished, just reply in one sentence.`;
+    }
+    if (settings.partial) {
+      const p = settings.partial;
+      context += `\n\nThe time limit cut you off while you were writing "${p.path}". The first ${p.content.length} characters are saved. Don't rewrite them: call append_file with path "${p.path}" and ONLY the rest of the document, continuing exactly where this leaves off:\n\`\`\`html\n…${p.content.slice(-1500)}\n\`\`\``;
+    }
+    const lastUser = [...convo].reverse().find((m) => m.role === "user");
+    if (lastUser) lastUser.content = `${lastUser.content ?? ""}${context}`;
+    else convo.push({ role: "user", content: `Continue.${context}` });
+
+    const touched = new Map<string, { version: number; created: boolean }>();
+    const checks = new Map<string, number>();
+    // The last file written this turn that hasn't been through a browser check yet.
+    let unchecked: string | null = settings.pendingCheck ?? null;
+    let autoChecks = 0;
+    // A request for a design system isn't done until it's saved to the picker.
+    const latestRequest = [...recent].reverse().find((m) => m.role === "user")?.content ?? "";
+    const wantsDesignSystem =
+      template.id === "designsystem" ||
+      !!settings.savedDesignSystemId ||
+      // "make a motion design system", "turn this into a design system"; not "a landing page using my design system".
+      /\b(create|make|build|generate|extract|define|set up|into)\s+(me\s+)?(a|an|the|our|my|new)?\s*([\w,'-]+\s+){0,3}design[- ]system/i.test(latestRequest);
+    let dsSaved = false;
+    let dsNudged = false;
+    // The spec file this turn wrote that the saved design system should match, if any.
+    const dsSpecFile = () => {
+      if (!wantsDesignSystem || dsSaved || !touched.size) return null;
+      const known = settings.designSystemFile;
+      return known ? (touched.has(known) ? known : null) : [...touched.keys()].pop()!;
+    };
+    // The model didn't save the design system it made: read the tokens out of the spec file itself.
+    const autoSaveDesignSystem = async (path: string) => {
+      const callId = `auto-save-ds-${Date.now()}`;
       try {
-        r = await chat(currentModel, {
-          messages: convo,
-          tools,
-          deadline,
-          signal,
-          onToken: (t) => {
-            beat();
-            void emit({ type: "token", payload: { t } });
-          },
-          onReasoning: (t) => {
-            beat();
-            void emit({ type: "reasoning", payload: { t } });
-          },
-          onToolDelta: (index, name, args) => {
-            beat();
-            if (name !== "write_file") return;
-            const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
-            const now = Date.now();
-            if (now - d.at < 250) return;
-            d.at = now;
-            const path = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(args)?.[1];
-            const content = partialJsonString(args, "content");
-            if (path && !d.path) {
-              try {
-                d.path = cleanPath(JSON.parse(`"${path}"`));
-              } catch {
-                d.path = cleanPath(path);
-              }
-            }
-            drafts.set(index, d);
-            if (d.path) writing = { path: d.path, args };
-            if (!d.path || content == null || content.length <= d.sent) return;
-            void emit({ type: "draft", payload: { path: d.path, append: content.slice(d.sent), reset: d.sent === 0 } });
-            d.sent = content.length;
-          },
-        });
+        const { content } = await fileTools.read_file({ path });
+        const tokens = extractDesignSystem(content, project.title ?? latestRequest);
+        if (!tokens) return;
+        await emit({ type: "tool-call", payload: { callId, name: "save_design_system", args: { name: tokens.name } } });
+        settings.designSystemFile = path;
+        const saved = await saveDesignSystem(db, projectId, settings, tokens);
+        dsSaved = true;
+        await emit({ type: "tool-result", payload: { callId, name: "save_design_system", dsName: saved.name, system: saved } });
       } catch (e) {
+        await emit({ type: "tool-result", payload: { callId, name: "save_design_system", error: e instanceof Error ? e.message : String(e) } });
+      }
+    };
+    const checkDeferred = !!settings.pendingCheck;
+    let badCalls = 0;
+    let status: "ready" | "paused" = "ready";
+    // The write_file call being streamed, so a turn cut off by the time limit can hand its partial file to the next round.
+    let writing: { path: string; args: string } | null = null;
+    const savePartial = async () => {
+      const content = writing ? partialJsonString(writing.args, "content") : null;
+      if (!writing?.path || !content || content.length < 400) return;
+      settings.partial = { path: writing.path, content };
+      await db.from("projects").update({ settings }).eq("id", projectId);
+    };
+
+    const requestText = () => {
+      const latest = [...recent].reverse().find((m) => m.role === "user" && !m.meta?.answers)?.content ?? "";
+      return `${project.goal ?? ""}${latest && latest !== project.goal ? `\nLatest request: ${latest}` : ""}`;
+    };
+    /** Render a file in a browser and review it; shared by the agent's own check_design calls and the automatic check. */
+    const runCheck = async (path: string) => {
+      const f = await fileTools.read_file({ path });
+      checks.set(f.path, (checks.get(f.path) ?? 0) + 1);
+      if (unchecked === f.path) unchecked = null;
+      const c = await checkDesign(db, projectId, f.content, { deadline, signal, request: requestText() });
+      const auto = automatedFindings(c);
+      const serious = c.issues.filter((i) => i.severity !== "low");
+      const visual = c.issues.map((i) => `${i.severity === "high" ? "High" : i.severity === "medium" ? "Medium" : "Low"}: ${i.where ? `${i.where}: ` : ""}${i.problem}`);
+      const needsFix = auto.length > 0 || serious.length > 0;
+      return {
+        path: f.path,
+        needsFix,
+        problems: [...auto, ...visual.filter((v) => !v.startsWith("Low"))],
+        result: {
+          path: f.path,
+          version: f.version,
+          automated_findings: auto,
+          visual_issues: c.issues,
+          overall: c.overall,
+          note: needsFix ? "Fix the automated findings and the high/medium visual issues." : "Looks good; no fixes needed.",
+        },
+        summary: { path: f.path, image: c.screenshotUrl, reviewer: c.reviewer, findings: [...auto, ...visual].slice(0, 12), count: auto.length + c.issues.length },
+      };
+    };
+
+    const finish = async (reply: string | null) => {
+      if (reply) {
+        reply = removeEmDashes(reply);
+        const meta = { files: [...touched].map(([path, v]) => ({ path, ...v })) };
+        const { data: message } = await db
+          .from("messages")
+          .insert({ project_id: projectId, role: "assistant", content: reply, meta, created_at: new Date().toISOString() })
+          .select("id, role, content, meta, created_at")
+          .single();
+        if (message) await emit({ type: "message", payload: { message } });
+      }
+    };
+
+    try {
+      for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) {
           await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
           break;
         }
-        if ((e as any)?.name === "TimeoutError" && deadline - Date.now() < STOP_MARGIN_MS + 5000) {
-          await savePartial();
+        if (deadline - Date.now() < STOP_MARGIN_MS) {
           status = "paused";
           await emit({ type: "continue", payload: {} });
           break;
         }
-        await emit({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
-        break;
-      }
-
-      writing = null;
-      const thought = r.reasoning.trim();
-      if (thought) await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
-
-      const text = r.content.trim();
-      if (!r.toolCalls.length) {
-        // Never hand back unverified work: check the last written file in a real browser and send real problems back to the model.
-        if (dsSpecFile() && !dsNudged) {
-          dsNudged = true;
-          convo.push({ role: "assistant", content: r.content || "Done." });
-          convo.push({
-            role: "user",
-            content: settings.savedDesignSystemId
-              ? "You changed the design system spec, so the saved copy in the design system picker is out of date. Call save_design_system again with the current palette (named colors, as #rrggbb) and fonts, then reply in one sentence."
-              : "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
-          });
-          continue;
+        if (!(await stillOwner())) {
+          await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
+          break;
         }
-        const tooLate = deadline - Date.now() < CHECK_MIN_MS;
-        // Postpone a check to the next round at most once, so a short round can never pause forever.
-        if (unchecked && autoChecks < 2 && !(tooLate && checkDeferred)) {
-          if (tooLate) {
-            settings.pendingCheck = unchecked;
-            await db.from("projects").update({ settings }).eq("id", projectId);
+
+        const drafts = new Map<number, { path: string; sent: number; at: number }>();
+        const stepStart = Date.now();
+        let r;
+        try {
+          r = await chat(currentModel, {
+            messages: convo,
+            tools,
+            deadline,
+            signal,
+            onToken: (t) => {
+              void emit({ type: "token", payload: { t } });
+            },
+            onReasoning: (t) => {
+              void emit({ type: "reasoning", payload: { t } });
+            },
+            onToolDelta: (index, name, args) => {
+              if (name !== "write_file") return;
+              const d = drafts.get(index) ?? { path: "", sent: 0, at: 0 };
+              const now = Date.now();
+              if (now - d.at < 250) return;
+              d.at = now;
+              const path = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(args)?.[1];
+              const content = partialJsonString(args, "content");
+              if (path && !d.path) {
+                try {
+                  d.path = cleanPath(JSON.parse(`"${path}"`));
+                } catch {
+                  d.path = cleanPath(path);
+                }
+              }
+              drafts.set(index, d);
+              if (d.path) writing = { path: d.path, args };
+              if (!d.path || content == null || content.length <= d.sent) return;
+              void emit({ type: "draft", payload: { path: d.path, append: content.slice(d.sent), reset: d.sent === 0 } });
+              d.sent = content.length;
+            },
+          });
+        } catch (e) {
+          if (signal.aborted) {
+            await finish(touched.size ? "Stopped. What's on the canvas so far is saved." : null);
+            break;
+          }
+          if ((e as any)?.name === "TimeoutError" && deadline - Date.now() < STOP_MARGIN_MS + 5000) {
+            await savePartial();
             status = "paused";
             await emit({ type: "continue", payload: {} });
             break;
           }
-          autoChecks++;
-          const path = unchecked;
-          const callId = `auto-check-${step}`;
-          await emit({ type: "note", payload: { text: "Checking the result in a real browser." } });
-          await emit({ type: "tool-call", payload: { callId, name: "check_design", args: { path } } });
-          let out: Awaited<ReturnType<typeof runCheck>> | null = null;
-          try {
-            out = await runCheck(path);
-            await emit({ type: "tool-result", payload: { callId, name: "check_design", ...out.summary } });
-          } catch (e) {
-            unchecked = null;
-            await emit({ type: "tool-result", payload: { callId, name: "check_design", path, error: e instanceof Error ? e.message : String(e) } });
+          await emit({ type: "error", payload: { message: e instanceof Error ? e.message : String(e) } });
+          break;
+        }
+
+        writing = null;
+        const thought = r.reasoning.trim();
+        if (thought) await emit({ type: "thought", payload: { text: thought.length > 12000 ? "…" + thought.slice(-12000) : thought, ms: Date.now() - stepStart } });
+
+        const text = r.content.trim();
+        if (!r.toolCalls.length) {
+          // Never hand back unverified work: check the last written file in a real browser and send real problems back to the model.
+          if (dsSpecFile() && !dsNudged) {
+            dsNudged = true;
+            convo.push({ role: "assistant", content: r.content || "Done." });
+            convo.push({
+              role: "user",
+              content: settings.savedDesignSystemId
+                ? "You changed the design system spec, so the saved copy in the design system picker is out of date. Call save_design_system again with the current palette (named colors, as #rrggbb) and fonts, then reply in one sentence."
+                : "You haven't saved the design system yet, so it isn't in the design system picker. Call save_design_system now with the palette (named colors including Background, Surface, Text, Accent, as #rrggbb) and the fonts from the spec you made, then reply in one sentence.",
+            });
+            continue;
+          }
+          const tooLate = deadline - Date.now() < CHECK_MIN_MS;
+          // Postpone a check to the next round at most once, so a short round can never pause forever.
+          if (unchecked && autoChecks < 2 && !(tooLate && checkDeferred)) {
+            if (tooLate) {
+              settings.pendingCheck = unchecked;
+              await db.from("projects").update({ settings }).eq("id", projectId);
+              status = "paused";
+              await emit({ type: "continue", payload: {} });
+              break;
+            }
+            autoChecks++;
+            const path = unchecked;
+            const callId = `auto-check-${step}`;
+            await emit({ type: "note", payload: { text: "Checking the result in a real browser." } });
+            await emit({ type: "tool-call", payload: { callId, name: "check_design", args: { path } } });
+            let out: Awaited<ReturnType<typeof runCheck>> | null = null;
+            try {
+              out = await runCheck(path);
+              await emit({ type: "tool-result", payload: { callId, name: "check_design", ...out.summary } });
+            } catch (e) {
+              unchecked = null;
+              await emit({ type: "tool-result", payload: { callId, name: "check_design", path, error: e instanceof Error ? e.message : String(e) } });
+            }
+            if (settings.pendingCheck) {
+              delete settings.pendingCheck;
+              await db.from("projects").update({ settings }).eq("id", projectId);
+            }
+            if (out?.needsFix) {
+              convo.push({ role: "assistant", content: r.content || "Done." });
+              convo.push({
+                role: "user",
+                content: `An automatic check of "${out.path}" in a real browser found these problems:\n${out.problems.map((p) => `- ${p}`).join("\n")}\nFix them now (str_replace for small fixes), then reply in one or two sentences. Don't ask the user; just fix it.`,
+              });
+              continue;
+            }
           }
           if (settings.pendingCheck) {
             delete settings.pendingCheck;
             await db.from("projects").update({ settings }).eq("id", projectId);
           }
-          if (out?.needsFix) {
-            convo.push({ role: "assistant", content: r.content || "Done." });
-            convo.push({
-              role: "user",
-              content: `An automatic check of "${out.path}" in a real browser found these problems:\n${out.problems.map((p) => `- ${p}`).join("\n")}\nFix them now (str_replace for small fixes), then reply in one or two sentences. Don't ask the user; just fix it.`,
-            });
-            continue;
-          }
+          const specFile = dsSpecFile();
+          if (specFile) await autoSaveDesignSystem(specFile);
+          await finish(text || (touched.size ? "Done. It's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
+          break;
         }
-        if (settings.pendingCheck) {
-          delete settings.pendingCheck;
-          await db.from("projects").update({ settings }).eq("id", projectId);
-        }
-        const specFile = dsSpecFile();
-        if (specFile) await autoSaveDesignSystem(specFile);
-        await finish(text || (touched.size ? "Done. It's on the canvas." : "I couldn't produce anything for that. Try rephrasing?"));
-        break;
-      }
-      if (text) await emit({ type: "note", payload: { text: removeEmDashes(text).slice(0, 240) } });
+        if (text) await emit({ type: "note", payload: { text: removeEmDashes(text).slice(0, 240) } });
 
-      convo.push({
-        role: "assistant",
-        content: r.content || null,
-        tool_calls: r.toolCalls.map((tc, i) => ({ id: tc.id || `call_${step}_${i}`, type: "function", function: { name: tc.name, arguments: tc.args } })),
-      });
+        convo.push({
+          role: "assistant",
+          content: r.content || null,
+          // Providers reject a request whose history holds invalid JSON arguments, so a cut-off call is replaced by a stub.
+          tool_calls: r.toolCalls.map((tc, i) => ({ id: tc.id || `call_${step}_${i}`, type: "function", function: { name: tc.name, arguments: validArgs(tc.args) } })),
+        });
 
-      let asked = false;
-      for (const [i, tc] of r.toolCalls.entries()) {
-        const callId = `${step}-${i}-${tc.id || ""}`;
-        const toolCallId = tc.id || `call_${step}_${i}`;
-        let result: unknown;
-        let args: any = {};
-        try {
+        let asked = false;
+        for (const [i, tc] of r.toolCalls.entries()) {
+          const callId = `${step}-${i}-${tc.id || ""}`;
+          const toolCallId = tc.id || `call_${step}_${i}`;
+          let result: unknown;
+          let args: any = {};
           try {
-            args = JSON.parse(tc.args || "{}");
-          } catch {
-            throw new Error(
-              r.finish === "length"
-                ? "your tool call was cut off because it was too long for one reply. Write the file in parts: write_file with the head, styles and first sections, then append_file for the remaining sections and scripts"
-                : "tool arguments were not valid JSON"
-            );
-          }
-          const shown =
-            tc.name === "write_file" || tc.name === "append_file" || tc.name === "str_replace" || tc.name === "read_file"
-              ? { path: cleanPath(args.path) }
-              : tc.name === "check_design"
-                ? { path: cleanPath(args.path) }
-                : tc.name === "ask_questions"
-                ? {}
-                : args;
-          await emit({ type: "tool-call", payload: { callId, name: tc.name, args: shown } });
-
-          let summary: Record<string, unknown> = {};
-          switch (tc.name) {
-            case "write_file":
-            case "append_file":
-            case "str_replace": {
-              let w;
-              if (tc.name === "append_file") {
-                const path = cleanPath(args.path);
-                // A finished file already ends in </body></html>; new parts go before that, and the parser tidies the rest.
-                const base =
-                  settings.partial?.path === path
-                    ? settings.partial.content
-                    : (await fileTools.read_file({ path })).content.replace(/<\/body>\s*<\/html>\s*$/i, "");
-                w = await fileTools.write_file({ path, content: base + String(args.content ?? "") });
-              } else {
-                w = tc.name === "write_file" ? await fileTools.write_file(args) : await fileTools.str_replace(args);
-              }
-              if (settings.partial && settings.partial.path === w.path) {
-                delete settings.partial;
+            try {
+              args = JSON.parse(tc.args || "{}");
+            } catch {
+              // A write cut off mid-file keeps what arrived, so the model only has to add the rest.
+              const rawPath = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(tc.args)?.[1];
+              const partial = tc.name === "write_file" ? partialJsonString(tc.args, "content") : null;
+              if (rawPath && partial && partial.length >= 400) {
+                const path = cleanPath(rawPath.replace(/\\"/g, '"'));
+                settings.partial = { path, content: partial };
                 await db.from("projects").update({ settings }).eq("id", projectId);
+                throw new Error(
+                  `your write_file was cut off after ${partial.length} characters because it was too long for one reply. That part is saved. Call append_file with path "${path}" and ONLY the rest of the document (keep each call under about 20,000 characters), continuing exactly after:\n…${partial.slice(-800)}`
+                );
               }
-              unchecked = w.path;
-              const prev = touched.get(w.path);
-              touched.set(w.path, { version: w.version, created: prev?.created ?? w.created });
-              result = { ok: true, path: w.path, version: w.version };
-              summary = { path: w.path, version: w.version, created: w.created };
-              break;
+              throw new Error(
+                r.finish === "length"
+                  ? "your tool call was cut off because it was too long for one reply. Write the file in parts: write_file with the head, styles and first sections, then append_file for the remaining sections and scripts"
+                  : "tool arguments were not valid JSON"
+              );
             }
-            case "read_file": {
-              const f = await fileTools.read_file(args);
-              result = f;
-              summary = { path: f.path, version: f.version };
-              break;
+            const shown =
+              tc.name === "write_file" || tc.name === "append_file" || tc.name === "str_replace" || tc.name === "read_file"
+                ? { path: cleanPath(args.path) }
+                : tc.name === "check_design"
+                  ? { path: cleanPath(args.path) }
+                  : tc.name === "ask_questions"
+                  ? {}
+                  : args;
+            await emit({ type: "tool-call", payload: { callId, name: tc.name, args: shown } });
+
+            let summary: Record<string, unknown> = {};
+            switch (tc.name) {
+              case "write_file":
+              case "append_file":
+              case "str_replace": {
+                let w;
+                if (tc.name === "append_file") {
+                  const path = cleanPath(args.path);
+                  // A finished file already ends in </body></html>; new parts go before that, and the parser tidies the rest.
+                  const base =
+                    settings.partial?.path === path
+                      ? settings.partial.content
+                      : (await fileTools.read_file({ path })).content.replace(/<\/body>\s*<\/html>\s*$/i, "");
+                  w = await fileTools.write_file({ path, content: base + String(args.content ?? "") });
+                } else {
+                  w = tc.name === "write_file" ? await fileTools.write_file(args) : await fileTools.str_replace(args);
+                }
+                if (settings.partial && settings.partial.path === w.path) {
+                  delete settings.partial;
+                  await db.from("projects").update({ settings }).eq("id", projectId);
+                }
+                unchecked = w.path;
+                const prev = touched.get(w.path);
+                touched.set(w.path, { version: w.version, created: prev?.created ?? w.created });
+                result = { ok: true, path: w.path, version: w.version };
+                summary = { path: w.path, version: w.version, created: w.created };
+                break;
+              }
+              case "read_file": {
+                const f = await fileTools.read_file(args);
+                result = f;
+                summary = { path: f.path, version: f.version };
+                break;
+              }
+              case "web_search": {
+                const hits = await sources.search(args);
+                result = hits;
+                summary = { query: args.query, results: hits.map((h) => ({ id: h.id, title: h.title, url: sources.sources.get(h.id)?.url })) };
+                break;
+              }
+              case "web_fetch": {
+                const f = await sources.fetch(args);
+                result = f;
+                summary = { source: { id: f.id, title: f.title, url: sources.sources.get(f.id)?.url } };
+                break;
+              }
+              case "repo_tree":
+              case "repo_read": {
+                if (!repo) throw new Error("no codebase is connected");
+                result = tc.name === "repo_tree" ? await repo.repo_tree(args) : await repo.repo_read(args);
+                summary = { path: args.path ?? "" };
+                break;
+              }
+              case "check_design": {
+                if ((checks.get(cleanPath(args.path)) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
+                if (deadline - Date.now() < CHECK_MIN_MS) throw new Error("not enough time left in this turn to run a visual check");
+                const out = await runCheck(cleanPath(args.path));
+                result = out.result;
+                summary = out.summary;
+                break;
+              }
+              case "save_design_system": {
+                if (!settings.designSystemFile && touched.size) settings.designSystemFile = [...touched.keys()].pop();
+                const saved = await saveDesignSystem(db, projectId, settings, args);
+                dsSaved = true;
+                result = { ok: true, id: saved.id, note: "Saved. It's now in the design system picker and set as this project's design system." };
+                summary = { dsName: saved.name, system: saved };
+                break;
+              }
+              case "ask_questions": {
+                const questions = cleanQuestions(args.questions);
+                if (!questions.length) throw new Error("no questions given");
+                await emit({ type: "questions", payload: { intro: String(args.intro ?? "").slice(0, 300), questions } });
+                result = { ok: true, note: "The user will answer in their next message." };
+                asked = true;
+                break;
+              }
+              default:
+                throw new Error(`unknown tool: ${tc.name}`);
             }
-            case "web_search": {
-              const hits = await sources.search(args);
-              result = hits;
-              summary = { query: args.query, results: hits.map((h) => ({ id: h.id, title: h.title, url: sources.sources.get(h.id)?.url })) };
-              break;
-            }
-            case "web_fetch": {
-              const f = await sources.fetch(args);
-              result = f;
-              summary = { source: { id: f.id, title: f.title, url: sources.sources.get(f.id)?.url } };
-              break;
-            }
-            case "repo_tree":
-            case "repo_read": {
-              if (!repo) throw new Error("no codebase is connected");
-              result = tc.name === "repo_tree" ? await repo.repo_tree(args) : await repo.repo_read(args);
-              summary = { path: args.path ?? "" };
-              break;
-            }
-            case "check_design": {
-              if ((checks.get(cleanPath(args.path)) ?? 0) >= 2) throw new Error("already checked this file twice this turn, so finish up");
-              if (deadline - Date.now() < CHECK_MIN_MS) throw new Error("not enough time left in this turn to run a visual check");
-              const out = await runCheck(cleanPath(args.path));
-              result = out.result;
-              summary = out.summary;
-              break;
-            }
-            case "save_design_system": {
-              if (!settings.designSystemFile && touched.size) settings.designSystemFile = [...touched.keys()].pop();
-              const saved = await saveDesignSystem(db, projectId, settings, args);
-              dsSaved = true;
-              result = { ok: true, id: saved.id, note: "Saved. It's now in the design system picker and set as this project's design system." };
-              summary = { dsName: saved.name, system: saved };
-              break;
-            }
-            case "ask_questions": {
-              const questions = (Array.isArray(args.questions) ? args.questions : [])
-                .slice(0, 4)
-                .map((q: any, qi: number) => ({
-                  id: String(q.id || `q${qi + 1}`).slice(0, 40),
-                  question: String(q.question ?? "").slice(0, 300),
-                  options: (Array.isArray(q.options) ? q.options : []).slice(0, 6).map((o: any) => String(o).slice(0, 120)),
-                }))
-                .filter((q: any) => q.question);
-              if (!questions.length) throw new Error("no questions given");
-              await emit({ type: "questions", payload: { intro: String(args.intro ?? "").slice(0, 300), questions } });
-              result = { ok: true, note: "The user will answer in their next message." };
-              asked = true;
-              break;
-            }
-            default:
-              throw new Error(`unknown tool: ${tc.name}`);
+            await emit({ type: "tool-result", payload: { callId, name: tc.name, ...summary } });
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            result = { error: message };
+            await emit({ type: "tool-result", payload: { callId, name: tc.name, error: message } });
+            badCalls++;
           }
-          await emit({ type: "tool-result", payload: { callId, name: tc.name, ...summary } });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          result = { error: message };
-          await emit({ type: "tool-result", payload: { callId, name: tc.name, error: message } });
-          badCalls++;
+          convo.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(result) });
         }
-        convo.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(result) });
+        await touch();
+        if (asked) break;
+        if (badCalls > 5) {
+          await emit({ type: "error", payload: { message: "Too many failed tool calls, so I stopped here." } });
+          break;
+        }
+        if (step === MAX_STEPS - 1) await finish("I hit the step limit for one turn. Say “continue” and I'll keep going.");
       }
-      await touch();
-      if (asked) break;
-      if (badCalls > 5) {
-        await emit({ type: "error", payload: { message: "Too many failed tool calls, so I stopped here." } });
-        break;
-      }
-      if (step === MAX_STEPS - 1) await finish("I hit the step limit for one turn. Say “continue” and I'll keep going.");
+    } finally {
+      settled = true;
+      await touch({ status, budget: { ...(project.budget ?? {}), searchesLeft: sources.searchesLeft } });
+      await emit({ type: "done", payload: {} });
     }
   } finally {
-    await touch({ status, budget: { ...(project.budget ?? {}), searchesLeft: sources.searchesLeft } });
-    await emit({ type: "done", payload: {} });
+    clearInterval(heartbeat);
+    // Setup failed before the loop: don't leave the project looking busy.
+    if (!settled) await touch({ status: "ready" });
   }
 }
