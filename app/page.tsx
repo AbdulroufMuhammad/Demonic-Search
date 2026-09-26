@@ -1,24 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
-import Sidebar from "@/components/Sidebar";
-import Composer from "@/components/Composer";
-import { getTemplate } from "@/lib/templates";
 import { fromRow } from "@/lib/designSystems";
-import { relativeTime } from "@/lib/relativeTime";
+import { MODEL_KEYS, MODELS } from "@/lib/gateway";
+import HomeClient from "@/components/home/HomeClient";
 
-const STATUS_LABEL: Record<string, string> = {
-  idle: "Not started",
-  running: "Researching",
-  ready: "Ready",
-  error: "Error",
-  needs_input: "Needs your input",
-};
-const statusColor = (s: string) =>
-  s === "ready" || s === "needs_input" ? "var(--accent)" : s === "error" ? "var(--danger)" : "var(--muted)";
-
-// Lists live projects/design systems — must never be frozen at build time,
-// and never served from a cached fetch (the Supabase client makes its own
-// fetch() calls under the hood, which Next.js can cache independently of
-// the route's own dynamic rendering unless explicitly told not to).
+// Lists live projects — never frozen at build time or served from a cached fetch.
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
@@ -26,57 +11,36 @@ export const fetchCache = "force-no-store";
 export default async function HomePage({ searchParams }: { searchParams: { ds?: string } }) {
   const admin = createAdminClient();
   const [{ data: projects }, { data: dsRows }] = await Promise.all([
-    admin
-      .from("projects")
-      .select("id, title, template, status, updated_at")
-      .order("updated_at", { ascending: false })
-      .limit(12),
+    admin.from("projects").select("id, title, template, status, updated_at").order("updated_at", { ascending: false }).limit(60),
     admin
       .from("design_systems")
       .select("*")
       .order("owner_id", { ascending: true, nullsFirst: true })
       .order("created_at", { ascending: true }),
   ]);
-  const systems = (dsRows ?? []).map(fromRow);
+
+  // The most recently written file of each project becomes its thumbnail.
+  const ids = (projects ?? []).map((p) => p.id);
+  const thumbs = new Map<string, string>();
+  if (ids.length) {
+    const { data: files } = await admin
+      .from("files")
+      .select("project_id, path, created_at")
+      .in("project_id", ids)
+      .order("created_at", { ascending: false })
+      .limit(1000);
+    for (const f of files ?? []) if (!thumbs.has(f.project_id)) thumbs.set(f.project_id, f.path);
+  }
 
   return (
-    <div className="app-shell">
-      <Sidebar active="home" recent={(projects ?? []).slice(0, 6).map((p) => ({ id: p.id, title: p.title }))} />
-      <main className="home-main">
-        <div className="home-col">
-          <h1 className="home-h1">What should we find out?</h1>
-          <Composer systems={systems} initialDsId={searchParams.ds ?? ""} />
-        </div>
-
-        {!!projects?.length && (
-          <div className="home-col">
-            <span className="section-label">Recent projects</span>
-            <div className="recent-projects-grid">
-              {projects.map((p) => {
-                const t = getTemplate(p.template);
-                return (
-                  <a key={p.id} href={`/project/${p.id}`} className="project-card">
-                    <div className="project-thumb">
-                      <span className="kind">{t.label}</span>
-                      <span className="headline">{p.title}</span>
-                      <span className="bar" style={{ width: "90%" }} />
-                      <span className="bar" style={{ width: "80%" }} />
-                      <span className="bar" style={{ width: "86%" }} />
-                    </div>
-                    <div className="project-meta">
-                      <span className="name">{p.title}</span>
-                      <span className="status">
-                        <span className="status-dot" style={{ background: statusColor(p.status) }} />
-                        {STATUS_LABEL[p.status] ?? p.status} · {relativeTime(p.updated_at)}
-                      </span>
-                    </div>
-                  </a>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </main>
-    </div>
+    <HomeClient
+      systems={(dsRows ?? []).map(fromRow)}
+      models={MODEL_KEYS.map((key) => ({ key, label: MODELS[key].label, note: MODELS[key].note }))}
+      initialDs={searchParams.ds ?? null}
+      projects={(projects ?? []).map((p) => ({
+        ...p,
+        thumb: thumbs.has(p.id) ? `/api/projects/${p.id}/render?thumb=1&path=${encodeURIComponent(thumbs.get(p.id)!)}` : null,
+      }))}
+    />
   );
 }

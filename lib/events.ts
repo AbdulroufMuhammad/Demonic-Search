@@ -1,34 +1,35 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type AgentEvent = {
-  role?: string;
   /**
-   * token/phase/tool-call/tool-result/error/done come from the agent loop.
-   * "say" is orchestrator narration shown as assistant text in the chat;
-   * "step" is a summarised pipeline step (plan, citation check, verify).
-   * "continue" means this invocation is pausing with real work still left
-   * (see pause() in orchestrator.ts) — the client re-POSTs /run to resume.
+   * note: the agent's one-line narration before a batch of tool calls.
+   * tool-call / tool-result: one tool use, paired by payload.callId.
+   * questions: the agent asked the user to fill in a short brief.
+   * token / draft / message: live-only (streamed text, the file being
+   * written, the final reply — which is stored in `messages` instead).
+   * continue: this invocation ran out of time with work left; the client
+   * re-POSTs with resume:true.
    */
-  type: "token" | "phase" | "tool-call" | "tool-result" | "error" | "done" | "say" | "step" | "continue";
+  type: "note" | "tool-call" | "tool-result" | "questions" | "error" | "done" | "continue" | "token" | "draft" | "message";
   payload: Record<string, unknown>;
 };
 
-/** Append-only event log, persisted to Supabase and optionally streamed live. */
-export function makeEmitter(
-  db: SupabaseClient,
-  projectId: string,
-  onEvent?: (e: AgentEvent) => void
-) {
+const LIVE_ONLY = new Set(["token", "draft", "message"]);
+
+/** Append-only event log, persisted to Supabase and streamed live. */
+export function makeEmitter(db: SupabaseClient, projectId: string, onEvent?: (e: AgentEvent & { id?: string; created_at?: string }) => void) {
   return async function emit(e: AgentEvent) {
-    onEvent?.(e);
-    // Tokens are only useful live; persisting one row per token floods the table.
-    if (e.type === "token") return;
-    await db.from("events").insert({
-      project_id: projectId,
-      role: e.role ?? null,
-      type: e.type,
-      payload: e.payload,
-    });
+    if (LIVE_ONLY.has(e.type)) {
+      onEvent?.(e);
+      return;
+    }
+    const created_at = new Date().toISOString();
+    const { data } = await db
+      .from("events")
+      .insert({ project_id: projectId, role: "agent", type: e.type, payload: e.payload, created_at })
+      .select("id")
+      .single();
+    onEvent?.({ ...e, id: data?.id, created_at });
   };
 }
 

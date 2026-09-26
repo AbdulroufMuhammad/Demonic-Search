@@ -1,80 +1,101 @@
-export type TemplateId =
-  | "blank"
-  | "document"
-  | "slides"
-  | "diagram"
-  | "report"
-  | "research"
-  | "wireframe";
-
+/**
+ * A template is only a starting hint: it picks the placeholder on Home and
+ * adds a short brief to the agent's instructions. Every project gets the
+ * same workspace and the same agent; nothing downstream branches on it.
+ */
 export type Template = {
-  id: TemplateId;
+  id: string;
   label: string;
-  icon: string;
-  /**
-   * Every template runs the same Plan -> research-if-needed -> Write ->
-   * Verify pipeline and has web_search/web_fetch available throughout — the
-   * model decides per-request whether a task needs real-world facts, not
-   * this field. This only controls the house-styled, citation-scaffolded
-   * "report" layout (numbered citations, margin notes, sources footer,
-   * takeaways grid) that only the research writerSkill's output matches —
-   * every other template still gets simple numbered citations + a sources
-   * footer appended automatically if it ends up citing anything, just not
-   * that specific magazine layout.
-   */
-  magazineReport: boolean;
-  writerSkill: string;
-  defaultExport: "pdf" | "pptx" | "html";
+  placeholder: string;
+  brief: string;
 };
 
-const RESEARCH_SKILL = `Write the report as semantic HTML inside one <article class="report"> element. Do not write any CSS or <style> tags, and do not write a header, date, stats line or sources list: the house stylesheet and those parts are added automatically from the board. Use exactly this structure, in order:
-<h1>Short title</h1>
-<p class="dek">One italic sentence saying what the report covers.</p>
-<ol class="takeaways"><li>Key takeaway [S1]</li><li>…</li><li>…</li></ol> (exactly three, one sentence each)
-Then 3 to 5 <section> elements, each an <h2> heading followed by content (see blocks below).
-In the most important section you may add one pull quote: <blockquote data-src="S3"><p>the exact quote text of a verified claim</p></blockquote>.
-If an open gap remains, end with <aside class="open-question"><p>The question the sources do not settle.</p></aside>.
-Every factual sentence ends with its source ID in square brackets, like [S3] or [S3, S5]. Use only source IDs from the verified claims.
-
-CONTENT BLOCKS — inside a <section>, mixed in with your <p> paragraphs wherever one earns its place. Use only the blocks that genuinely fit this request; a plain factual answer needs none of them beyond the structure above, while a feasibility study, comparison, plan, or technical write-up typically earns two or three. Never reach for a block just to look richer — a table that just restates one sentence, or a chart with no real numbers behind it, is decoration, not substance. Pick blocks by what the material actually is, not to hit a quota.
-
-Stat grid — a handful of headline numbers (market size, a before/after comparison, adoption figures):
-<div class="stat-grid"><div class="stat-card"><span class="stat-num">42%</span><span class="stat-label">cost reduction [S2]</span></div>…</div>
-3 to 5 cards. Every number must come from a verified claim; cite it in the label.
-
-Data table — comparing options, specs, pricing, or anything with more than a couple of columns:
-<div class="data-table"><table><thead><tr><th>Option</th><th>Cost</th><th>Status</th></tr></thead><tbody><tr><td>Vendor A</td><td>$12k/mo [S4]</td><td><span class="tag" data-tone="accent">Recommended</span></td></tr></tbody></table></div>
-Wrap any status/verdict word in <span class="tag">; data-tone="accent" for recommended/positive, "outline" (the default, can be omitted) for neutral/planned, "muted" for n/a or excluded.
-
-Callout — one genuinely load-bearing point per report at most: an executive summary, the single biggest risk, or a critical assumption everything else depends on:
-<div class="callout"><p class="callout-label">Executive summary</p><p>… [S1]</p></div>
-Add data-tone="neutral" to the outer div for an assumption/caveat rather than a highlighted takeaway.
-
-Milestones — a roadmap, phased rollout, or implementation plan:
-<ol class="milestones"><li><span class="m-when">Week 1–2</span><h4>Discovery</h4><p>… [S2]</p><p class="m-done"><strong>Done when:</strong> a concrete, checkable criterion.</p></li>…</ol>
-Every item needs a real "done when" criterion, not a restatement of the activity.
-
-Risk grid — a feasibility or risk-analysis request:
-<div class="risk-grid"><div class="risk-card"><h4>Vendor lock-in</h4><p>… [S5]</p><p class="fix"><strong>Mitigation:</strong> …</p></div>…</div>
-Each card pairs one real, sourced risk with one concrete mitigation — never a risk with no fix or a fix with no risk.
-
-Code block — only when the request is actually about code, an API, or a technical setup and a short real snippet clarifies it:
-<div class="code-block"><div class="cb-bar"><span>bash</span><span>setup.sh</span></div><pre><code>npm install</code></pre></div>
-Escape &lt; &gt; and &amp; inside the code text (as &amp;lt; &amp;gt; &amp;amp;) — it renders as literal HTML, not inside a script tag.
-
-Figure — only when an inline SVG diagram (architecture, flow, a simple bar/line chart of real sourced numbers) would clarify something prose can't:
-<figure class="figure"><div class="figure-media"><svg …>…</svg></div><figcaption>Fig 1. Caption [S3]</figcaption></figure>
-Keep the SVG simple — boxes, arrows, bars — and only plot numbers that came from a verified claim.`;
-
 export const TEMPLATES: Template[] = [
-  { id: "research", label: "Research", icon: "⌕", magazineReport: true, defaultExport: "pdf", writerSkill: RESEARCH_SKILL },
-  { id: "document", label: "Document", icon: "▦", magazineReport: false, defaultExport: "pdf", writerSkill: "Write one flowing HTML document body. Use a <style> block with an @page rule for size/margins and running headers. Keep it printable." },
-  { id: "slides", label: "Slides", icon: "≡", magazineReport: false, defaultExport: "pptx", writerSkill: "Write a fixed 1920x1080 <section class=\"slide\"> per slide inside one HTML file. Put speaker notes in a data-notes attribute on each section." },
-  { id: "diagram", label: "Diagram", icon: "◫", magazineReport: false, defaultExport: "html", writerSkill: "Produce a single HTML file with an inline SVG diagram. Prefer CSS grid for architecture boxes, SVG for flows and connectors." },
-  { id: "wireframe", label: "Wireframe", icon: "▶", magazineReport: false, defaultExport: "html", writerSkill: "Produce a low-fidelity HTML/CSS wireframe: boxes, labels, no real content." },
-  { id: "blank", label: "Blank", icon: "▯", magazineReport: false, defaultExport: "html", writerSkill: "Produce a single self-contained HTML file for whatever the user asked for." },
-] as unknown as Template[];
+  {
+    id: "blank",
+    label: "Blank",
+    placeholder: "Describe what you want to create…",
+    brief: "No fixed format. Decide the most fitting form for the request.",
+  },
+  {
+    id: "mobile",
+    label: "Mobile app design",
+    placeholder: "Describe an app idea",
+    brief:
+      "Mobile app screens. Lay out 3–5 key screens side by side as 390×844 phone frames (rounded corners, status bar, home indicator) on a quiet neutral canvas, each with a small caption above it. Real, specific content — never lorem ipsum. Make primary interactions work (tabs, toggles, navigation between screens) with a little vanilla JS where it's cheap.",
+  },
+  {
+    id: "slides",
+    label: "Slides",
+    placeholder: "Make a pitch deck about…",
+    brief:
+      'A slide deck. Each slide is a 1920×1080 <section class="slide">, stacked vertically with a gap and scaled with CSS to fit the viewport width. Include print CSS (@page { size: 1920px 1080px; margin: 0 } and a page break after each slide) so it exports as one slide per page. Arrow keys scroll to the next/previous slide. One idea per slide, big type, strong hierarchy; speaker notes go in a data-notes attribute.',
+  },
+  {
+    id: "document",
+    label: "Document",
+    placeholder: "Write a one-pager about…",
+    brief:
+      'A printable document. Use US Letter pages (<div class="page"> at 8.5in × 11in with real margins) shown as paper sheets with a soft shadow on a neutral background, plus @page rules so each .page prints as one sheet. Editorial typography: a clear type scale, measured line length, running header/footer where it helps.',
+  },
+  {
+    id: "wireframe",
+    label: "Wireframe",
+    placeholder: "Wireframe the flow for…",
+    brief:
+      "Low-fidelity wireframes: grayscale boxes, real labels and copy, simple annotations explaining intent. Show several screens of the flow side by side with arrows or numbered steps between them. No decorative color or imagery.",
+  },
+  {
+    id: "animation",
+    label: "Animation",
+    placeholder: "Animate a logo reveal",
+    brief:
+      "An animation that plays on load, built with CSS keyframes, the Web Animations API, canvas or SVG. Include a small replay control. Expose speed/duration and key colors as tweaks so they can be adjusted live.",
+  },
+  {
+    id: "ui",
+    label: "UI mockups",
+    placeholder: "Design the dashboard for…",
+    brief:
+      "High-fidelity desktop UI mockups (1440px wide screens) with realistic data. Show the key screens stacked with a label above each, or one interactive prototype with a startScreen tweak that switches between them. Real component states: hover, selected, empty, loading where relevant.",
+  },
+  {
+    id: "resume",
+    label: "Résumé",
+    placeholder: "Create a résumé for…",
+    brief:
+      "A one-page résumé on a US Letter sheet, printable (@page rules), with clean semantic structure (name, contact, summary, experience, skills, education). Refined typography, restrained accent color, no photos or skill bars.",
+  },
+  {
+    id: "3d",
+    label: "3D object",
+    placeholder: "Model a 3D object of…",
+    brief:
+      'A 3D scene with three.js loaded as an ES module via an import map from https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js (addons from .../examples/jsm/). Orbit controls, good lighting and materials, full-viewport canvas that resizes. Expose color, rotation speed and similar as tweaks.',
+  },
+  {
+    id: "research",
+    label: "Research",
+    placeholder: "Research and summarize…",
+    brief:
+      "A cited research report. Use web_search and web_fetch to gather real facts first. Every factual sentence ends with its source ID in brackets like [S3] or [S3, S5]; a numbered sources list is appended automatically, so don't write one. Lead with the answer, then the evidence; use tables or charts only where there are real numbers.",
+  },
+  {
+    id: "email",
+    label: "HTML email",
+    placeholder: "Design an email announcing…",
+    brief:
+      "An HTML email: 600px wide, table-based layout with inline styles, bulletproof buttons and web-safe font fallbacks, so it survives real email clients. Show it centered on a light gray backdrop.",
+  },
+  {
+    id: "palette",
+    label: "Color + type pairing",
+    placeholder: "Explore colors and type for…",
+    brief:
+      "A color and type exploration: 3–4 distinct directions, each a specimen card with a Google Fonts pairing (headline + body), a palette with named swatches and hex values, and a small UI sample (button, card, heading) using it.",
+  },
+];
 
-export function getTemplate(id: string): Template {
-  return TEMPLATES.find((t) => t.id === id) ?? TEMPLATES.find((t) => t.id === "blank")!;
+export function getTemplate(id: string | null | undefined): Template {
+  return TEMPLATES.find((t) => t.id === id) ?? TEMPLATES[0];
 }

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Demonic Search",
-  description: "Research and artifact engine on open models, backed by Supabase.",
+  description: "Describe it, and a design agent builds it live on a canvas.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

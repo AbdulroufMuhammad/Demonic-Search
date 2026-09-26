@@ -1,89 +1,65 @@
 # Demonic Search
 
-A Claude Design–style research and artifact engine: describe what you want, an
-orchestrated team of agents researches the web with citations and writes a
-finished HTML artifact (document, slides, diagram, or a cited research
-report) onto a live canvas, exportable to PDF or standalone HTML.
+A Claude Design–style design tool on open models. Describe what you want,
+pick a template and design system, and a design agent builds it live on a
+canvas — then you iterate by chatting, commenting on elements, editing text
+and type directly, or sliding the design's own tweak controls. Exports to PDF
+(via the browser's print dialog) or standalone HTML.
 
 It runs on OpenAI-compatible chat-completions endpoints (NVIDIA NIM /
-DeepSeek) over raw HTTP — no vendor SDK — and uses **Supabase** for the
-project/message database, the shared agent blackboard (sources, claims,
-gaps), and the artifact file store (Storage). There are no user accounts:
-every project is open to whoever has its URL, and the app talks to Supabase
-entirely through the service-role client.
+DeepSeek) over raw HTTP — no vendor SDK — with **Supabase** for projects,
+messages, the agent event log, web sources and versioned design files
+(Storage). There are no user accounts: every project is open to whoever has
+its URL, and the app talks to Supabase through the service-role client.
 
-This implements the architecture from the attached research/build guide,
-scoped to a working core + research pipeline (guide §§1–8, roughly the
-"Core" + "Research" + "Collaboration" build-order milestones).
+## How it works
 
-## Architecture
-
-- **Client** — Next.js App Router. Home screen (composer + template picker +
-  history), a per-project workspace with a chat/event log and a sandboxed
-  `<iframe>` canvas, plus a clean read-only report view at `/p/[id]`.
-- **App API** — Next.js route handlers under `app/api/*`. No auth: every
-  route resolves a project through the Supabase service-role client
-  (`lib/access.ts`) and returns 404 if it doesn't exist. Nothing scopes a
-  project to a user — the `owner_id` columns are unused, kept only so the
-  schema doesn't need another migration if accounts come back later.
-- **Orchestrator** (`lib/orchestrator.ts`, `lib/agents/*`) — a blackboard
-  (`lib/board.ts`) plus deterministic control flow: Planner → parallel
-  Researchers → citation check → Critic → loop on high-priority gaps →
-  Writer → Verifier. Budgets (tokens/searches/rounds) are enforced in code,
-  not prompts.
-- **Model gateway** (`lib/gateway.ts`) — a small `fetch` + SSE client with a
-  model registry (`z-ai/glm-5.3`, `glm-5.3-flash`, `meta/muse-glimmer-30b`,
-  Nemotron Omni, DeepSeek) and one-shot provider fallback.
-- **Tools** — `lib/tools/tavily.ts` (web_search/web_fetch, with a per-project
-  source registry so agents cite short IDs like `S3`, never raw URLs) and
-  `lib/tools/files.ts` (write_file/str_replace/read_file, backed by the
-  Supabase `artifacts` storage bucket + a `files` version table).
-- **Render/export** — artifacts are plain HTML served from the public
-  Storage bucket (an isolated origin from the app). `/api/projects/[id]/export`
-  renders the same URL to PDF with headless Chromium (Playwright).
-
-## Supabase project
-
-A project named **demonic-search** (`gsoiexqtaiyjepzqyfso`) was created and
-migrated with the schema below (see `supabase/migrations/0001_init.sql`):
-
-- `profiles`, `design_systems`, `projects`, `messages`
-- `sources`, `claims`, `gaps` (the blackboard's persisted state)
-- `files` (artifact version metadata; bytes live in the `artifacts` Storage
-  bucket, public-read / service-role-write)
-- `events` (append-only agent event log, also streamed live over SSE)
-
-RLS is still defined on every table (scoped to `owner_id`), but the app
-itself never hits it — every request goes through the service-role client,
-which bypasses RLS by design. It's dormant, not enforced.
+- **Home** (`app/page.tsx`, `components/home/*`) — composer with a design
+  system picker, model picker and GitHub codebase picker; a template grid
+  (Blank, Mobile app, Slides, Document, Wireframe, Animation, UI mockups,
+  Résumé, 3D object, Research, HTML email, Color + type pairing); and a
+  projects table/grid with live thumbnails.
+- **Workspace** (`components/project/*`) — the same for every project: chat on
+  the left, canvas on the right. A template is only a hint to the agent; it
+  never changes the UI.
+- **Design agent** (`lib/agent.ts`) — one conversational tool-use loop per
+  message. Tools: `write_file` / `str_replace` / `read_file` (versioned HTML
+  files), `web_search` / `web_fetch` (Tavily, cited by short source IDs),
+  `repo_tree` / `repo_read` (the connected GitHub codebase), and
+  `ask_questions` (a short brief rendered as a form). It narrates each step,
+  which the chat shows as activity rows, and the file being written streams to
+  the canvas as it's generated.
+- **Canvas** (`components/project/Canvas.tsx`, `lib/canvasBridge.ts`) — designs
+  run in an iframe sandboxed without `allow-same-origin`; a small injected
+  bridge handles Comment mode (click anything → comment goes to the agent with
+  that element's HTML), Edit mode (type in place, size/leading/spacing/weight/
+  color/alignment), tweaks, page counting and streamed drafts.
+- **Tweaks** — the agent declares live controls in the file
+  (`<script type="application/json" id="tweaks">`); the canvas applies them as
+  CSS variables, `data-*` attributes and a `tweak` event, and saves values
+  back into the file.
+- **Versions** — every write is a new immutable version in Storage; the file
+  menu lists versions to preview or restore.
+- **Model gateway** (`lib/gateway.ts`) — streaming client with a model
+  registry, an idle (not total) timeout so long files can finish, and a
+  one-shot fallback to a second provider.
+- **Time limits** — a turn that nears the function's time budget pauses and
+  the client resumes it automatically in a fresh invocation.
 
 ## Setup
 
 ```bash
 cp .env.example .env.local
-# fill in SUPABASE_SERVICE_ROLE_KEY (Project Settings → API) and your
-# NVIDIA_API_KEY / DEEPSEEK_API_KEY / TAVILY_API_KEY
+# fill in SUPABASE_SERVICE_ROLE_KEY, NVIDIA_API_KEY / DEEPSEEK_API_KEY,
+# TAVILY_API_KEY, and optionally GITHUB_TOKEN / GITHUB_OWNER
 npm install
 npm run dev
 ```
 
-No sign-in: describe what to build on Home, pick a template (Research
-enables the citation pipeline), and submit. The workspace opens and starts
-streaming the agent run. Anyone with a project's URL can open, run, chat
-with, or edit it — there's no login and no ownership check.
+Migrations live in `supabase/migrations/` (the Supabase project is
+`demonic-search`, `gsoiexqtaiyjepzqyfso`).
 
-## What's implemented vs. scoped out
+## Not implemented yet
 
-Implemented: gateway + streaming tool calls, agent loop, blackboard on
-Supabase, Tavily search/extract with source registry + citation checker,
-Planner/Researcher/Critic/Writer/Verifier roles, budget guard, project
-history, sandboxed canvas, HTML + PDF export, a research report laid out
-from the board (citations, margin source notes, sources list) rather than
-free-form Writer HTML, an Inspector for direct text/size/spacing edits and
-Writer-routed edits on cited text, design systems (seeded starters plus
-user-created ones) that drive a report's colors and fonts, and a read-only
-share link.
-
-Not implemented (see the guide's Wk 13+ "Refinement" milestone): PPTX
-export, design-system ingestion from uploaded files (the drop zone on
-Design systems is a placeholder), thumbnails.
+PPTX export, design-system extraction from uploaded brand files, image
+attachments (attachments are text files), and a local-folder codebase option.

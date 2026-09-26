@@ -1,80 +1,103 @@
-import type { Board } from "@/lib/board";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const TAVILY = "https://api.tavily.com";
+
+export type Source = { url: string; title?: string; text?: string };
 
 async function tv(path: string, body: Record<string, unknown>) {
   const res = await fetch(TAVILY + path, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.TAVILY_API_KEY ?? ""}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${process.env.TAVILY_API_KEY ?? ""}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`tavily ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`tavily ${res.status}: ${(await res.text()).slice(0, 300)}`);
   return res.json();
 }
 
-// Agents only ever see short source IDs, titles and snippets — never raw
-// URLs — so a model cannot fabricate a citation link (guide §6).
-export async function webSearch(
-  board: Board,
-  { query, max_results = 6 }: { query: string; max_results?: number },
-  facetId?: string
-) {
-  board.spend("search");
-  const r = await tv("/search", { query, max_results, search_depth: "advanced" });
-  const out = [];
-  for (const x of r.results ?? []) {
-    const id = board.registerSource(x.url, x.title, x.content, facetId);
-    await board.persistSource(id);
-    out.push({ id, title: x.title, snippet: String(x.content ?? "").slice(0, 400), score: x.score });
+/**
+ * The project's web sources, keyed by short IDs (S1, S2…). The agent only
+ * ever sees these IDs, titles and text — never URLs — so it can't invent a
+ * citation link; lib/finalize.ts turns [S3] back into a numbered reference.
+ */
+export class SourceRegistry {
+  sources = new Map<string, Source>();
+  searchesLeft: number;
+
+  private constructor(private db: SupabaseClient, private projectId: string, searchesLeft: number) {
+    this.searchesLeft = searchesLeft;
   }
-  return out;
+
+  static async load(db: SupabaseClient, projectId: string, budget: any) {
+    const reg = new SourceRegistry(db, projectId, Number(budget?.searchesLeft ?? 40));
+    const { data } = await db.from("sources").select("short_id, url, title, text").eq("project_id", projectId);
+    for (const s of data ?? []) reg.sources.set(s.short_id, { url: s.url, title: s.title ?? undefined, text: s.text ?? undefined });
+    return reg;
+  }
+
+  private spend() {
+    if (this.searchesLeft <= 0) throw new Error("the search budget for this project is used up — continue with what you have");
+    this.searchesLeft -= 1;
+  }
+
+  private async register(url: string, title?: string, text?: string) {
+    for (const [id, s] of this.sources) if (s.url === url) return id;
+    let n = this.sources.size + 1;
+    while (this.sources.has(`S${n}`)) n++;
+    const id = `S${n}`;
+    this.sources.set(id, { url, title, text });
+    await this.persist(id);
+    return id;
+  }
+
+  private async persist(id: string) {
+    const s = this.sources.get(id)!;
+    await this.db.from("sources").upsert(
+      { project_id: this.projectId, short_id: id, url: s.url, title: s.title, text: s.text, fetched_at: new Date().toISOString() },
+      { onConflict: "project_id,short_id" }
+    );
+  }
+
+  async search({ query, max_results = 6 }: { query: string; max_results?: number }) {
+    this.spend();
+    const r = await tv("/search", { query, max_results: Math.min(10, Number(max_results) || 6), search_depth: "advanced" });
+    const out = [];
+    for (const x of r.results ?? []) {
+      const id = await this.register(x.url, x.title, x.content);
+      out.push({ id, title: x.title, snippet: String(x.content ?? "").slice(0, 400) });
+    }
+    return out;
+  }
+
+  async fetch({ source_id }: { source_id: string }) {
+    const src = this.sources.get(source_id);
+    if (!src) throw new Error("unknown source_id — use an ID returned by web_search");
+    this.spend();
+    try {
+      const r = await tv("/extract", { urls: [src.url] });
+      src.text = r.results?.[0]?.raw_content ?? src.text;
+      await this.persist(source_id);
+    } catch {
+      // keep the search snippet we already have
+    }
+    return { id: source_id, title: src.title, text: (src.text ?? "").slice(0, 20000) };
+  }
 }
 
-export async function webFetch(board: Board, { source_id }: { source_id: string }) {
-  const src = board.sources.get(source_id); // only ever a known, registered source
-  if (!src) throw new Error("unknown source_id");
-  board.spend("extract");
-  let text = src.text;
-  try {
-    const r = await tv("/extract", { urls: [src.url] });
-    text = r.results?.[0]?.raw_content ?? text;
-  } catch {
-    // keep whatever snippet text we already have from search
-  }
-  src.text = text;
-  await board.persistSource(source_id);
-  return { id: source_id, text: (text ?? "").slice(0, 20000) };
-}
-
-export const TAVILY_TOOL_SCHEMAS = [
+export const WEB_TOOL_SCHEMAS = [
   {
     type: "function" as const,
     function: {
       name: "web_search",
-      description: "Search the web. Returns short source IDs, titles and snippets — never raw URLs.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          max_results: { type: "number" },
-        },
-        required: ["query"],
-      },
+      description: "Search the web. Returns source IDs (S1, S2…), titles and snippets — cite facts as [S1].",
+      parameters: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] },
     },
   },
   {
     type: "function" as const,
     function: {
       name: "web_fetch",
-      description: "Fetch the full extracted text of a source previously returned by web_search.",
-      parameters: {
-        type: "object",
-        properties: { source_id: { type: "string" } },
-        required: ["source_id"],
-      },
+      description: "Read the full text of a source previously returned by web_search.",
+      parameters: { type: "object", properties: { source_id: { type: "string" } }, required: ["source_id"] },
     },
   },
 ];

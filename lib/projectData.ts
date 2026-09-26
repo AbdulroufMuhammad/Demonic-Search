@@ -1,130 +1,96 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { BUCKET } from "@/lib/tools/files";
+import { modelKeyFor, type ModelKey } from "@/lib/gateway";
 
-export type FileEntry = { path: string; version: number; url: string };
-export type StoredEvent = { id: string; role: string | null; type: string; payload: any; created_at: string };
-export type StoredMessage = { id: string; role: string; content: string; created_at: string };
+export type FileVersion = { version: number; created_at: string };
+export type FileEntry = { path: string; version: number; url: string; updated_at: string; versions: FileVersion[] };
+export type StoredEvent = { id: string; type: string; payload: any; created_at: string };
+export type StoredMessage = { id: string; role: string; content: string; meta: any; created_at: string };
+export type SourceEntry = { id: string; title: string; url: string };
 
-export type BoardData = {
-  facets: { id: string; question: string }[];
-  sources: { id: string; title: string; url: string; facetId: string | null }[];
-  claims: {
-    id: string;
-    text: string;
-    quote: string;
-    sourceIds: string[];
-    confidence: number | null;
-    ok: boolean | null;
-    facetId: string | null;
-  }[];
-  gaps: { id: string; facetId: string | null; question: string; priority: string; resolved: boolean }[];
-  budget: { tokensLeft: number; searchesLeft: number } | null;
+export type ProjectInfo = {
+  id: string;
+  title: string;
+  template: string;
+  status: string;
+  model: ModelKey;
+  design_system_id: string | null;
+  codebase: string | null;
+  updated_at: string;
 };
 
 export type ProjectData = {
-  project: {
-    id: string;
-    title: string;
-    goal: string;
-    template: string;
-    status: string;
-    share_access: string;
-    updated_at: string;
-  };
+  project: ProjectInfo;
   files: FileEntry[];
   events: StoredEvent[];
   messages: StoredMessage[];
-  board: BoardData;
+  sources: SourceEntry[];
 };
 
-export async function loadBoard(db: SupabaseClient, projectId: string, plan?: any, budget?: any): Promise<BoardData> {
-  const [{ data: sources }, { data: claims }, { data: gaps }] = await Promise.all([
-    db.from("sources").select("short_id, url, title, facet_id").eq("project_id", projectId).order("created_at"),
-    db.from("claims").select("id, text, quote, source_ids, confidence, ok, facet_id").eq("project_id", projectId).order("created_at"),
-    db.from("gaps").select("id, facet_id, question, priority, resolved").eq("project_id", projectId).order("created_at"),
-  ]);
+/** A run is considered dead (and the project unlocked) after this long without a heartbeat. */
+export const STALE_RUN_MS = 6 * 60_000;
+
+export function projectInfo(p: any): ProjectInfo {
+  const stale = p.status === "running" && Date.now() - new Date(p.updated_at).getTime() > STALE_RUN_MS;
   return {
-    facets: plan?.facets ?? [],
-    sources: (sources ?? [])
-      .map((s) => ({ id: s.short_id, title: s.title ?? s.url, url: s.url, facetId: s.facet_id ?? null }))
-      .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))),
-    claims: (claims ?? []).map((c) => ({
-      id: c.id,
-      text: c.text,
-      quote: c.quote ?? "",
-      sourceIds: c.source_ids ?? [],
-      confidence: c.confidence == null ? null : Number(c.confidence),
-      ok: c.ok,
-      facetId: c.facet_id ?? null,
-    })),
-    gaps: (gaps ?? []).map((g) => ({
-      id: g.id,
-      facetId: g.facet_id ?? null,
-      question: g.question,
-      priority: g.priority,
-      resolved: g.resolved,
-    })),
-    budget: budget ? { tokensLeft: budget.tokensLeft, searchesLeft: budget.searchesLeft } : null,
+    id: p.id,
+    title: p.title,
+    template: p.template,
+    status: stale ? "ready" : p.status,
+    model: modelKeyFor(p.model_profile),
+    design_system_id: p.design_system_id ?? null,
+    codebase: p.codebase ?? null,
+    updated_at: p.updated_at,
   };
 }
 
-export async function latestFiles(db: SupabaseClient, projectId: string): Promise<FileEntry[]> {
-  const { data: files } = await db
+export async function listFiles(db: SupabaseClient, projectId: string): Promise<FileEntry[]> {
+  const { data } = await db
     .from("files")
-    .select("path, version, storage_path")
+    .select("path, version, storage_path, created_at")
     .eq("project_id", projectId)
     .order("version", { ascending: false });
-  const latest = new Map<string, FileEntry>();
-  for (const f of files ?? [])
-    if (!latest.has(f.path))
-      latest.set(f.path, {
+  const byPath = new Map<string, FileEntry>();
+  for (const f of data ?? []) {
+    let entry = byPath.get(f.path);
+    if (!entry) {
+      entry = {
         path: f.path,
         version: f.version,
-        url: db.storage.from("artifacts").getPublicUrl(f.storage_path).data.publicUrl,
-      });
-  return [...latest.values()];
+        url: db.storage.from(BUCKET).getPublicUrl(f.storage_path).data.publicUrl,
+        updated_at: f.created_at,
+        versions: [],
+      };
+      byPath.set(f.path, entry);
+    }
+    entry.versions.push({ version: f.version, created_at: f.created_at });
+  }
+  return [...byPath.values()].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 }
 
-/** Everything the workspace needs to rebuild the chat thread, board and canvas. */
 export async function loadProjectData(db: SupabaseClient, project: any): Promise<ProjectData> {
-  const [files, { data: events }, { data: messages }, board] = await Promise.all([
-    latestFiles(db, project.id),
-    db
-      .from("events")
-      .select("id, role, type, payload, created_at")
-      .eq("project_id", project.id)
-      .neq("type", "token")
-      .order("created_at"),
-    db.from("messages").select("id, role, content, created_at").eq("project_id", project.id).order("created_at"),
-    loadBoard(db, project.id, project.plan, project.budget),
+  const [files, { data: events }, { data: messages }, { data: sources }] = await Promise.all([
+    listFiles(db, project.id),
+    db.from("events").select("id, type, payload, created_at").eq("project_id", project.id).order("created_at"),
+    db.from("messages").select("id, role, content, meta, created_at").eq("project_id", project.id).order("created_at"),
+    db.from("sources").select("short_id, url, title").eq("project_id", project.id),
   ]);
   return {
-    project: {
-      id: project.id,
-      title: project.title,
-      goal: project.goal ?? project.title,
-      template: project.template,
-      status: project.status,
-      share_access: project.share_access ?? "private",
-      updated_at: project.updated_at,
-    },
+    project: projectInfo(project),
     files,
     events: events ?? [],
     messages: messages ?? [],
-    board,
+    sources: (sources ?? []).map((s) => ({ id: s.short_id, title: s.title ?? s.url, url: s.url })),
   };
 }
 
-export async function readArtifact(db: SupabaseClient, projectId: string, path = "index.html") {
-  const { data: file } = await db
-    .from("files")
-    .select("storage_path, version")
-    .eq("project_id", projectId)
-    .eq("path", path)
-    .order("version", { ascending: false })
-    .limit(1)
-    .single();
-  if (!file) return null;
-  const { data: blob } = await db.storage.from("artifacts").download(file.storage_path);
+export async function readFile(db: SupabaseClient, projectId: string, path: string, version?: number) {
+  let q = db.from("files").select("storage_path, version").eq("project_id", projectId).eq("path", path);
+  q = version ? q.eq("version", version) : q.order("version", { ascending: false });
+  const { data } = await q.limit(1);
+  const row = data?.[0];
+  if (!row) return null;
+  const { data: blob } = await db.storage.from(BUCKET).download(row.storage_path);
   if (!blob) return null;
-  return { content: await blob.text(), version: file.version as number };
+  return { path, content: await blob.text(), version: row.version as number };
 }

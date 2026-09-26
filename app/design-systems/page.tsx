@@ -1,32 +1,25 @@
 import { createAdminClient } from "@/lib/supabase/admin";
-import Sidebar from "@/components/Sidebar";
+import { fromRow } from "@/lib/designSystems";
 import DesignSystemsClient from "@/components/DesignSystemsClient";
-import { DEFAULT_DS, fromRow } from "@/lib/designSystems";
+import AppHeader from "@/components/ui/AppHeader";
 
-// No per-request auth call remains to force dynamic rendering, and this
-// page must never be frozen at build time (it lists live projects/systems),
-// nor served from a cached fetch — see the matching note on app/page.tsx.
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
-export default async function DesignSystemsPage() {
+export default async function DesignSystemsPage({ searchParams }: { searchParams: { new?: string } }) {
   const admin = createAdminClient();
-  const [{ data: projects }, { data: dsRows }] = await Promise.all([
-    admin.from("projects").select("id, title").order("updated_at", { ascending: false }).limit(6),
-    admin
-      .from("design_systems")
-      .select("*")
-      .order("owner_id", { ascending: true, nullsFirst: true })
-      .order("created_at", { ascending: true }),
-  ]);
-  const systems = [DEFAULT_DS, ...(dsRows ?? []).map(fromRow)];
+  const { data: dsRows } = await admin
+    .from("design_systems")
+    .select("*")
+    .order("owner_id", { ascending: true, nullsFirst: true })
+    .order("created_at", { ascending: true });
 
   return (
-    <div className="app-shell">
-      <Sidebar active="ds" recent={projects ?? []} />
+    <div className="home">
+      <AppHeader />
       <main className="ds-main">
-        <DesignSystemsClient initialSystems={systems} />
+        <DesignSystemsClient initialSystems={(dsRows ?? []).map(fromRow)} startNew={searchParams.new === "1"} />
       </main>
     </div>
   );

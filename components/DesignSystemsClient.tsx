@@ -1,113 +1,135 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import type { DesignSystem } from "@/lib/designSystems";
-import { googleFontsHref } from "@/lib/designSystems";
+import { useState } from "react";
+import Link from "next/link";
+import type { DesignSystem, DSColor, DSFont } from "@/lib/designSystems";
+import { DesignSystemCard, DesignSystemFonts } from "@/components/ui/Pickers";
+import { IconClose, IconPlus } from "@/components/ui/Icons";
 
-export default function DesignSystemsClient({ initialSystems }: { initialSystems: DesignSystem[] }) {
-  const router = useRouter();
+const BLANK_COLORS: DSColor[] = [
+  { name: "Background", hex: "#f7f5f0" },
+  { name: "Surface", hex: "#ebe7de" },
+  { name: "Text", hex: "#1f1d1a" },
+  { name: "Accent", hex: "#d9774f" },
+];
+const BLANK_FONTS: DSFont[] = [
+  { role: "Heading", stack: "'Fraunces', serif" },
+  { role: "Body", stack: "'Inter', sans-serif" },
+];
+
+export default function DesignSystemsClient({ initialSystems, startNew }: { initialSystems: DesignSystem[]; startNew: boolean }) {
   const [systems, setSystems] = useState(initialSystems);
   const [selectedId, setSelectedId] = useState(initialSystems[0]?.id ?? "");
-  const [newOpen, setNewOpen] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [creating, setCreating] = useState(false);
-
-  const fontHrefs = useMemo(
-    () => [...new Set(systems.map((s) => googleFontsHref(s)).filter((h): h is string => !!h))],
-    [systems]
-  );
+  const [editing, setEditing] = useState(startNew);
+  const [name, setName] = useState("");
+  const [colors, setColors] = useState<DSColor[]>(BLANK_COLORS);
+  const [fonts, setFonts] = useState<DSFont[]>(BLANK_FONTS);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const det = systems.find((s) => s.id === selectedId);
+  const draft: DesignSystem = { id: "draft", name: name || "Untitled system", colors, fonts };
 
-  async function createDs() {
-    if (creating) return;
-    setCreating(true);
+  async function create() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
     try {
       const res = await fetch("/api/design-systems", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName.trim() || "Untitled system" }),
+        body: JSON.stringify({ name: name.trim() || "Untitled system", colors, fonts }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "failed to create design system");
+      if (!res.ok) throw new Error(data.error ?? "Couldn't save the design system");
       setSystems((s) => [...s, data.system]);
       setSelectedId(data.system.id);
-      setNewOpen(false);
-      setNewName("");
-    } catch {
-      // the form stays open so the name isn't lost; a retry is the recovery path here
+      setEditing(false);
+      setName("");
+      setColors(BLANK_COLORS);
+      setFonts(BLANK_FONTS);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setCreating(false);
+      setSaving(false);
     }
-  }
-
-  function useInNewProject() {
-    if (!det) return;
-    router.push(det.id === "default" ? "/" : `/?ds=${det.id}`);
   }
 
   return (
     <>
-      {fontHrefs.map((href) => (
-        <link key={href} rel="stylesheet" href={href} />
-      ))}
-
-      <div className="ds-header">
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <DesignSystemFonts systems={[...systems, draft]} />
+      <div className="ds-page-head">
+        <div>
           <h1>Design systems</h1>
-          <span style={{ fontSize: 14, color: "var(--muted)" }}>
-            The Writer applies the selected system&rsquo;s colors and type to every artifact.
-          </span>
+          <p className="muted">The agent designs with the selected system&rsquo;s palette and type.</p>
         </div>
-        <button className="btn-primary" onClick={() => setNewOpen((v) => !v)}>
-          New system
-        </button>
+        {!editing && (
+          <button type="button" className="btn-accent" onClick={() => setEditing(true)}>
+            <IconPlus size={14} /> New design system
+          </button>
+        )}
       </div>
 
-      {newOpen && (
-        <div className="ds-new-form">
-          <div className="ds-new-fields">
-            <input
-              className="text-input"
-              placeholder="Name, e.g. Acme Brand"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-            />
+      {editing && (
+        <div className="ds-editor">
+          <div className="ds-editor-form">
+            <label className="field">
+              <span>Name</span>
+              <input className="text-input" placeholder="e.g. Acme Brand" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+            </label>
+            <div className="field">
+              <span>Colors</span>
+              {colors.map((c, i) => (
+                <div key={i} className="token-row">
+                  <input type="color" value={c.hex} onChange={(e) => setColors((cs) => cs.map((x, j) => (j === i ? { ...x, hex: e.target.value } : x)))} />
+                  <input className="text-input" value={c.name} onChange={(e) => setColors((cs) => cs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+                  <span className="mono muted">{c.hex}</span>
+                  <button type="button" className="icon-btn" onClick={() => setColors((cs) => cs.filter((_, j) => j !== i))} aria-label="Remove color">
+                    <IconClose size={13} />
+                  </button>
+                </div>
+              ))}
+              {colors.length < 12 && (
+                <button type="button" className="btn-ghost sm" onClick={() => setColors((cs) => [...cs, { name: `Color ${cs.length + 1}`, hex: "#888888" }])}>
+                  <IconPlus size={13} /> Add color
+                </button>
+              )}
+            </div>
+            <div className="field">
+              <span>Type (Google Fonts family, first is headings)</span>
+              {fonts.map((f, i) => (
+                <div key={i} className="token-row">
+                  <input className="text-input narrow" value={f.role} onChange={(e) => setFonts((fs) => fs.map((x, j) => (j === i ? { ...x, role: e.target.value } : x)))} />
+                  <input
+                    className="text-input"
+                    value={f.stack.match(/'([^']+)'/)?.[1] ?? f.stack}
+                    onChange={(e) => {
+                      const fam = e.target.value.replace(/'/g, "");
+                      const generic = /serif/i.test(f.stack) && !/sans/i.test(f.stack) ? "serif" : "sans-serif";
+                      setFonts((fs) => fs.map((x, j) => (j === i ? { ...x, stack: `'${fam}', ${generic}` } : x)));
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+            {error && <p className="form-error">{error}</p>}
             <div className="form-actions">
-              <button className="btn-secondary" onClick={createDs} disabled={creating}>
-                {creating ? "Creating…" : "Create"}
+              <button type="button" className="btn-accent" onClick={create} disabled={saving}>
+                {saving ? "Saving…" : "Save design system"}
               </button>
-              <button className="btn-ghost" onClick={() => setNewOpen(false)}>
+              <button type="button" className="btn-ghost" onClick={() => setEditing(false)}>
                 Cancel
               </button>
             </div>
           </div>
-          <div className="drop-zone">
-            <span className="t1">Drop brand files</span>
-            <span className="t2">PDF, PPTX, images or fonts. Colors and type are extracted into tokens.</span>
+          <div className="ds-editor-preview">
+            <DesignSystemCard ds={draft} />
           </div>
         </div>
       )}
 
-      <div className="ds-grid">
+      <div className="systems-grid">
         {systems.map((s) => (
-          <button key={s.id} className={`ds-card${selectedId === s.id ? " selected" : ""}`} onClick={() => setSelectedId(s.id)}>
-            <div className="ds-card-colors">
-              {s.colors.map((c, i) => (
-                <span key={i} style={{ background: c.hex }} />
-              ))}
-            </div>
-            <div className="ds-card-body">
-              <div className="ds-card-title-row">
-                <span className="name">{s.name}</span>
-                {s.id === "default" && <span className="ds-badge">Default</span>}
-              </div>
-              <span className="ds-card-meta">
-                {s.colors.length} colors · {s.fonts.length} typefaces
-                {s.updated_at ? ` · updated ${new Date(s.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : ""}
-              </span>
-            </div>
-          </button>
+          <DesignSystemCard key={s.id} ds={s} selected={s.id === selectedId} onClick={() => setSelectedId(s.id)} />
         ))}
       </div>
 
@@ -115,29 +137,27 @@ export default function DesignSystemsClient({ initialSystems }: { initialSystems
         <div className="ds-detail">
           <div className="ds-detail-head">
             <h2>{det.name}</h2>
-            <button className="btn-ghost outline-text" onClick={useInNewProject}>
+            <Link href={`/?ds=${det.id}`} className="btn-secondary">
               Use in a new project →
-            </button>
+            </Link>
           </div>
-          <div className="ds-tokens-grid">
+          <div className="ds-swatches">
             {det.colors.map((c, i) => (
-              <div key={i} className="ds-token">
-                <span className="ds-token-swatch" style={{ background: c.hex }} />
-                <span className="ds-token-name">
-                  <span>{c.name}</span>
-                  <span className="hex">{c.hex}</span>
-                </span>
+              <div key={i} className="ds-swatch">
+                <span style={{ background: c.hex }} />
+                <strong>{c.name}</strong>
+                <span className="mono muted">{c.hex}</span>
               </div>
             ))}
           </div>
-          <div className="ds-fonts-grid">
+          <div className="ds-fonts">
             {det.fonts.map((f, i) => (
-              <div key={i} className="ds-font-card">
-                <span className="ds-font-role">{f.role}</span>
+              <div key={i} className="ds-font">
+                <span className="muted">{f.role}</span>
                 <span className="ds-font-sample" style={{ fontFamily: f.stack }}>
-                  The quick brown fox
+                  The quick brown fox jumps over the lazy dog
                 </span>
-                <span className="ds-font-stack">{f.stack}</span>
+                <span className="mono muted">{f.stack}</span>
               </div>
             ))}
           </div>
