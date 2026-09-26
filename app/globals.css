@@ -503,3 +503,57 @@ button.avatar { cursor: pointer; }
   .keys-row { grid-template-columns: 1fr 1fr; }
   .keys-row.head { display: none; }
 }
+
+/* Pages menu (canvas header) */
+.pages-menu { min-width: 300px; max-width: 360px; padding: 6px; }
+.pages-scroll { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.page-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px; border-radius: 9px; text-align: left; color: var(--text); font-size: 13.5px; }
+.page-row:hover:not(:disabled) { background: var(--surface-2); }
+.page-row.on { background: var(--surface); }
+.page-row:disabled { opacity: 0.5; }
+.page-icon { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 36px; border-radius: 6px; border: 1px dashed var(--line-2); color: var(--muted); }
+.page-icon.doc { border: 0; background: #f3e3d9; color: #9a6a52; }
+.page-name { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.page-name small { font-weight: 400; color: var(--muted); font-size: 12px; }
+.page-row.all { border-top: 1px solid var(--line); border-radius: 0 0 9px 9px; margin-top: 2px; color: var(--text-2); font-size: 13px; }
+/* All project files */
+.files-browser { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); border-top: 1px solid var(--line); }
+.files-browser.dragging::after { content: "Drop to attach to your next message"; position: absolute; inset: 10px; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 14px; background: color-mix(in srgb, var(--bg) 80%, transparent); color: var(--text); font-weight: 500; pointer-events: none; }
+.fb-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.fb-crumb { color: var(--text-2); font-size: 13px; }
+.fb-bar .grow { flex: 1; }
+.fb-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+.fb-list { overflow-y: auto; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.fb-section { padding: 12px 16px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: var(--panel); border-bottom: 1px solid var(--line); }
+.fb-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); text-align: left; color: var(--text); }
+.fb-row:hover { background: var(--surface); }
+.fb-row.on { background: var(--surface-2); }
+.fb-icon { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 36px; border-radius: 6px; background: #f3e3d9; color: #9a6a52; overflow: hidden; }
+.fb-icon.text, .fb-icon.folder { background: #f1e7c4; color: #8a7433; }
+.fb-icon img { width: 100%; height: 100%; object-fit: cover; }
+.fb-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-name small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.fb-time { flex: none; color: var(--muted); font-size: 12px; }
+.fb-empty { margin: 0; padding: 12px 16px; color: var(--muted); font-size: 13px; }
+.fb-drop { margin-top: auto; padding: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font-size: 13px; }
+.fb-drop strong { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.fb-preview { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; min-width: 0; }
+.fb-thumb { width: 100%; aspect-ratio: 16 / 10; border-radius: 10px; overflow: hidden; border: 1px solid var(--line-2); background: #fff; position: relative; display: grid; place-items: center; }
+.fb-thumb iframe { position: absolute; top: 0; left: 0; width: 1280px; height: 800px; border: 0; transform-origin: 0 0; transform: scale(var(--fb-scale, 0.3)); pointer-events: none; }
+.fb-thumb.image img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.fb-meta { display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; font-size: 13px; }
+@media (max-width: 760px) { .fb-body { grid-template-columns: 1fr; } .fb-preview { display: none; } }
+/* Sketch pad */
+.sketch { width: min(1100px, 96vw); max-height: 94vh; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line-2); }
+.sketch-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sketch-tools { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sketch-color { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; outline: 1px solid var(--line-2); }
+.sketch-color.on { border-color: var(--bg); outline: 2px solid var(--accent); }
+.sketch-size { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; }
+.sketch-size i { display: block; border-radius: 50%; background: var(--text); }
+.sketch-size.on { background: var(--surface-2); }
+.sketch-sep { width: 1px; height: 20px; background: var(--line-2); margin: 0 4px; }
+.btn-ghost.on { background: var(--surface-2); color: var(--text); }
+.sketch-canvas { width: 100%; height: auto; max-height: 72vh; aspect-ratio: 1400 / 900; border-radius: 10px; background: #fff; cursor: crosshair; touch-action: none; }
+.sketch-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; padding: 10px 16px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line-2); color: var(--text); font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }

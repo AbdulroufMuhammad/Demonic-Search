@@ -17,6 +17,9 @@ import Popover, { MenuItem } from "@/components/ui/Popover";
 import { DesignSystemPicker, ModelPicker, type ModelOption } from "@/components/ui/Pickers";
 import VoiceButton from "@/components/ui/VoiceButton";
 import { AttachButton, AttachmentChips, filesToAttachments, pastedImages, type Attachment } from "@/components/ui/Attachments";
+import FilesBrowser from "@/components/project/FilesBrowser";
+import SketchPad from "@/components/project/SketchPad";
+import AccessMenu from "@/components/access/AccessMenu";
 import {
   IconArrowUp,
   IconChevronDown,
@@ -24,7 +27,9 @@ import {
   IconDownload,
   IconExpand,
   IconExternal,
+  IconFile,
   IconHistory,
+  IconPlus,
   IconHome,
   IconPencil,
   IconPlay,
@@ -100,6 +105,10 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // "All project files" replaces the canvas while open; the sketch pad is a modal.
+  const [showFiles, setShowFiles] = useState(false);
+  const [sketchOpen, setSketchOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const canvas = useRef<CanvasHandle>(null);
   const stage = useRef<HTMLDivElement>(null);
@@ -207,6 +216,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           const html = (p.reset || !cur || cur.path !== p.path ? "" : cur.html) + String(p.append ?? "");
           draftBuf.current = { path: p.path, html };
           if (p.reset) {
+            // The agent is writing: show the canvas so the change is visible as it happens.
+            setShowFiles(false);
             draftingPath.current = p.path;
             setActivePath(p.path);
             setViewVersion(null);
@@ -257,7 +268,8 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
           const now = new Date().toISOString();
           const existing = fs.find((f) => f.path === p.path);
           const entry: FileEntry = existing
-            ? { ...existing, version: p.version, updated_at: now, versions: [{ version: p.version, created_at: now }, ...existing.versions] }
+            ? // A request keeps updating one working version, so the same version number replaces its entry.
+              { ...existing, version: p.version, updated_at: now, versions: [{ version: p.version, created_at: now }, ...existing.versions.filter((v) => v.version !== p.version)] }
             : { path: p.path, version: p.version, url: "", updated_at: now, versions: [{ version: p.version, created_at: now }] };
           return [entry, ...fs.filter((f) => f.path !== p.path)];
         });
@@ -509,6 +521,63 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
     if (m !== "view") setChatOpen(true);
   }
 
+  /** Open a page on the canvas (leaving the file browser). */
+  function openPage(path: string) {
+    setShowFiles(false);
+    setActivePath(path);
+    setViewVersion(null);
+  }
+
+  async function newPage() {
+    const res = await fetch(`/api/projects/${project.id}/file`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (!res.ok) return setNotice("Couldn't create a page.");
+    const { path } = await res.json();
+    await refreshProject();
+    openPage(path);
+  }
+
+  async function addFiles(list: File[]) {
+    try {
+      const added = await filesToAttachments(list);
+      if (!added.length) return setNotice("Those files can't be used here (images and text files work).");
+      setAttachments((cur) => [...cur, ...added].slice(0, 6));
+      setNotice(`${added.length === 1 ? `"${added[0].name}" is` : `${added.length} files are`} attached to your next message.`);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function attachSketch(png: Blob) {
+    const n = messages.reduce((c, m) => c + ((m.meta?.attachments ?? []) as Attachment[]).filter((a) => /^sketch/i.test(a.name)).length, 0) + attachments.filter((a) => /^sketch/i.test(a.name)).length + 1;
+    await addFiles([new File([png], `Sketch ${n}.png`, { type: "image/png" })]);
+    setSketchOpen(false);
+  }
+
+  /** Paste from the clipboard: images become image attachments, text a text attachment. */
+  async function pasteClipboard() {
+    try {
+      const items = await navigator.clipboard.read();
+      const images: File[] = [];
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (type) images.push(new File([await item.getType(type)], `Pasted image ${images.length + 1}.${type.split("/")[1]}`, { type }));
+      }
+      if (images.length) return addFiles(images);
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) return setNotice("The clipboard is empty.");
+      setAttachments((cur) => [...cur, { kind: "text" as const, name: "Pasted text.txt", content: text.slice(0, 100_000) }].slice(0, 6));
+      setNotice("Pasted text is attached to your next message.");
+    } catch {
+      setNotice("The browser didn't allow reading the clipboard. Paste into the message box instead (Ctrl+V).");
+    }
+  }
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   async function restore(version: number) {
     if (!activePath) return;
     const res = await fetch(`/api/projects/${project.id}/edit`, {
@@ -756,58 +825,99 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               >
                 <IconSliders size={16} />
               </button>
+              {activeFile && activeFile.versions.length > 1 && (
+                <Popover
+                  panelClassName="menu files-menu"
+                  trigger={(_o, toggle) => (
+                    <button type="button" className={`icon-btn${viewVersion != null ? " on" : ""}`} title="Version history" onClick={toggle}>
+                      <IconHistory size={16} />
+                    </button>
+                  )}
+                  render={(close) => (
+                    <>
+                      <div className="pop-label">Versions of {activePath?.replace(/\.html$/, "")}</div>
+                      <div className="versions-scroll">
+                        {activeFile.versions.map((v, i) => (
+                          <MenuItem
+                            key={v.version}
+                            active={(viewVersion ?? activeFile.version) === v.version}
+                            hint={<span suppressHydrationWarning>{relativeTime(v.created_at)}</span>}
+                            onClick={() => {
+                              setViewVersion(i === 0 ? null : v.version);
+                              close();
+                            }}
+                          >
+                            Version {v.version}
+                            {i === 0 ? " · latest" : ""}
+                          </MenuItem>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                />
+              )}
               <Popover
-                panelClassName="menu files-menu"
+                panelClassName="menu pages-menu"
                 trigger={(_o, toggle) => (
-                  <button type="button" className="file-title" onClick={toggle} disabled={!files.length}>
+                  <button type="button" className="file-title" onClick={toggle}>
                     <span className="file-title-name">
-                      {activePath ? activePath.replace(/\.html$/, "") : "No files yet"}
-                      {files.length > 0 && <IconChevronDown size={13} />}
+                      {showFiles ? "All files" : activePath ? activePath.replace(/\.html$/, "") : "No pages yet"}
+                      <IconChevronDown size={13} />
                     </span>
-                    {pageLabel && <span className="file-title-sub">{pageLabel}</span>}
+                    <span className="file-title-sub">{showFiles ? `${files.length} page${files.length === 1 ? "" : "s"}` : pageLabel || (files.length ? `${files.length} page${files.length === 1 ? "" : "s"}` : "")}</span>
                   </button>
                 )}
                 render={(close) => (
                   <>
-                    <div className="pop-label">Files</div>
-                    {files.map((f) => (
-                      <MenuItem
-                        key={f.path}
-                        active={f.path === activePath}
-                        hint={<span suppressHydrationWarning>{relativeTime(f.updated_at)}</span>}
-                        onClick={() => {
-                          setActivePath(f.path);
-                          setViewVersion(null);
-                          close();
-                        }}
-                      >
-                        {f.path.replace(/\.html$/, "")}
-                      </MenuItem>
-                    ))}
-                    {activeFile && activeFile.versions.length > 1 && (
-                      <>
-                        <div className="pop-sep" />
-                        <div className="pop-label">
-                          <IconHistory size={12} /> Versions of {activePath?.replace(/\.html$/, "")}
-                        </div>
-                        <div className="versions-scroll">
-                          {activeFile.versions.map((v, i) => (
-                            <MenuItem
-                              key={v.version}
-                              active={(viewVersion ?? activeFile.version) === v.version}
-                              hint={<span suppressHydrationWarning>{relativeTime(v.created_at)}</span>}
-                              onClick={() => {
-                                setViewVersion(i === 0 ? null : v.version);
-                                close();
-                              }}
-                            >
-                              Version {v.version}
-                              {i === 0 ? " · latest" : ""}
-                            </MenuItem>
-                          ))}
-                        </div>
-                      </>
-                    )}
+                    <div className="pop-label">Pages</div>
+                    <button
+                      type="button"
+                      className="page-row new"
+                      disabled={running}
+                      onClick={() => {
+                        close();
+                        void newPage();
+                      }}
+                    >
+                      <span className="page-icon">
+                        <IconPlus size={14} />
+                      </span>
+                      <span className="page-name">New blank page</span>
+                    </button>
+                    <div className="pages-scroll">
+                      {[...files]
+                        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+                        .map((f) => (
+                          <button
+                            key={f.path}
+                            type="button"
+                            className={`page-row${f.path === activePath && !showFiles ? " on" : ""}`}
+                            onClick={() => {
+                              openPage(f.path);
+                              close();
+                            }}
+                          >
+                            <span className="page-icon doc">
+                              <IconFile size={14} />
+                            </span>
+                            <span className="page-name">
+                              {f.path.replace(/\.html$/, "")}
+                              <small suppressHydrationWarning>Edited {relativeTime(f.updated_at)}</small>
+                            </span>
+                          </button>
+                        ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="page-row all"
+                      onClick={() => {
+                        setShowFiles(true);
+                        close();
+                      }}
+                    >
+                      <span className="page-name">All project files</span>
+                      <span aria-hidden>→</span>
+                    </button>
                   </>
                 )}
               />
@@ -898,7 +1008,7 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
               <button type="button" className="btn-share" onClick={() => setShareOpen(true)}>
                 <IconShare size={14} /> Share
               </button>
-              <span className="avatar">Y</span>
+              <AccessMenu />
             </div>
           </div>
 
@@ -919,7 +1029,25 @@ export default function ProjectView({ initial, systems, models }: { initial: Pro
             <div className="mode-hint">{mode === "comment" ? "Click anything on the canvas to comment on it" : "Click text to edit it, or adjust its style"} · Esc to exit</div>
           )}
 
-          <div className="stage" ref={stage}>
+          {sketchOpen && <SketchPad onSave={attachSketch} onClose={() => setSketchOpen(false)} />}
+          {notice && <div className="toast">{notice}</div>}
+          {showFiles && (
+            <FilesBrowser
+              projectId={project.id}
+              files={files}
+              messages={messages}
+              pending={attachments}
+              activePath={activePath}
+              onOpen={openPage}
+              onNewPage={() => void newPage()}
+              onNewSketch={() => setSketchOpen(true)}
+              onPaste={() => void pasteClipboard()}
+              onDropFiles={(list) => void addFiles(list)}
+              onRefresh={() => void refreshProject()}
+              onClose={() => setShowFiles(false)}
+            />
+          )}
+          <div className="stage" ref={stage} hidden={showFiles}>
             {html != null || drafting ? (
               <Canvas ref={canvas} html={html} docKey={docKey} draft={drafting ? draft!.html : null} mode={mode} zoom={zoom} onMessage={onCanvas} />
             ) : (

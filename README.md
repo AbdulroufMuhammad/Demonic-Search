@@ -69,6 +69,15 @@ read-only file, render and export endpoints they use).
   Small follow-up edits run as one step. A step that only deliberates for 45s
   (90s when planning) is cut, its thinking kept, and the rest of the request is
   handed to DeepSeek V3 with that plan.
+- **Pages and files** — the canvas header's menu lists the project's pages
+  (newest first, with edit times), a **New blank page**, and **All project
+  files**: pages and uploads side by side with a preview, **New sketch** (a
+  drawing pad whose PNG goes to the agent as an attachment), **Paste** and a
+  drop zone. Version history has its own button.
+- **Versions** — one version per finished request: writes during a request
+  (plan, build, check and fixes, across resumes) update a single working
+  version, which becomes final when the request is done and checked. The next
+  request, or the user's own edit, starts a new version.
 - **Live canvas** — the moment a plan is handed in, a wireframe of it (palette,
   sections) is drawn on the canvas (`lib/planPreview.ts`); then every
   write_file and append_file streams onto the canvas as it's written.

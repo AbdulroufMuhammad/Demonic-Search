@@ -37,7 +37,7 @@ async function uploadImage(file: File): Promise<Attachment> {
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "Upload failed");
-  return { kind: "image", name: data.name, url: data.url };
+  return { kind: "image", name: data.name ?? file.name, url: data.url };
 }
 
 /** Turn picked, dropped or pasted files into attachments: images are uploaded, text files are read. */

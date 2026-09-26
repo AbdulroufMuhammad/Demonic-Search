@@ -15,8 +15,16 @@ export function cleanPath(raw: string) {
   return `${name}.html`;
 }
 
-const storageKey = (projectId: string, version: number, path: string) =>
-  `${projectId}/${version}/${path.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
+// Each write gets its own object (rev), even when it updates a working version, so no cache can serve an old copy.
+const storageKey = (projectId: string, version: number, path: string, rev?: number) =>
+  `${projectId}/${version}/${rev ? `${rev}-` : ""}${path.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
+
+/**
+ * The versions an agent request is still working on, per file. Writes during a request update that one
+ * working version instead of adding a version per edit; the version is final once the request is done
+ * and verified (the caller then clears this). The next request, or the user's own edit, starts a new one.
+ */
+export type WorkingVersions = { versions: Record<string, number>; save: () => Promise<unknown> };
 
 export type FileWrite = { path: string; version: number; url: string; created: boolean };
 
@@ -25,7 +33,7 @@ export type FileWrite = { path: string; version: number; url: string; created: b
  * version, with the `files` table as the version index. `transform` runs on
  * every write (see lib/finalize.ts).
  */
-export function makeFileTools(db: SupabaseClient, projectId: string, transform?: (content: string) => string) {
+export function makeFileTools(db: SupabaseClient, projectId: string, transform?: (content: string) => string, working?: WorkingVersions) {
   async function latest(path: string) {
     const { data } = await db
       .from("files")
@@ -44,16 +52,31 @@ export function makeFileTools(db: SupabaseClient, projectId: string, transform?:
     if (typeof content !== "string" || !content.trim()) throw new Error("content is empty");
     if (transform) content = transform(content);
     const prev = await latest(path);
-    const version = (prev?.version ?? 0) + 1;
-    const key = storageKey(projectId, version, path);
+    const reuse = !!working && !!prev && working.versions[path] === prev.version;
+    const version = reuse ? prev!.version : (prev?.version ?? 0) + 1;
+    const key = storageKey(projectId, version, path, reuse ? Date.now() : undefined);
     const { error } = await db.storage
       .from(BUCKET)
       .upload(key, new Blob([content], { type: "text/html" }), { contentType: "text/html; charset=utf-8", upsert: true });
     if (error) throw new Error(`storage upload failed: ${error.message}`);
-    const { error: rowErr } = await db
-      .from("files")
-      .insert({ project_id: projectId, path, version, storage_path: key, content_type: "text/html" });
-    if (rowErr) throw new Error(`saving file failed: ${rowErr.message}`);
+    if (reuse) {
+      const { error: rowErr } = await db
+        .from("files")
+        .update({ storage_path: key, created_at: new Date().toISOString() })
+        .eq("project_id", projectId)
+        .eq("path", path)
+        .eq("version", version);
+      if (rowErr) throw new Error(`saving file failed: ${rowErr.message}`);
+    } else {
+      const { error: rowErr } = await db
+        .from("files")
+        .insert({ project_id: projectId, path, version, storage_path: key, content_type: "text/html" });
+      if (rowErr) throw new Error(`saving file failed: ${rowErr.message}`);
+      if (working) {
+        working.versions[path] = version;
+        await working.save();
+      }
+    }
     return { path, version, url: db.storage.from(BUCKET).getPublicUrl(key).data.publicUrl, created: !prev };
   }
 

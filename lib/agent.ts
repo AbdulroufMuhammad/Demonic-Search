@@ -300,6 +300,8 @@ type ProjectSettings = {
   buildReply?: string;
   /** The model that took over from a reasoning model that deliberated too long; kept for the rest of the request. */
   buildModel?: ModelKey;
+  /** File versions this request is still writing (see WorkingVersions); cleared when the request is done. */
+  workingVersions?: Record<string, number>;
   /** The design system this project made and saved to the picker, and its spec file; revisions to that file update it. */
   savedDesignSystemId?: string;
   designSystemFile?: string;
@@ -463,7 +465,15 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     sources.turnLimit = template.id === "research" ? (depth ?? DEFAULT_DEPTH).sources : 6;
     // The printed page count the automatic check holds the design to (a file can also declare its own with <meta name="pages">).
     const printPages: [number, number] | null = template.id === "resume" ? [1, 1] : depth ? depth.pages : null;
-    const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources));
+    // A new request starts fresh versions; resumed steps of the same request keep updating the same ones.
+    if (!opts.resume) delete settings.workingVersions;
+    const workingVersions = (settings.workingVersions ??= {});
+    const fileTools = makeFileTools(db, projectId, (html) => finalizeArtifact(html, sources.sources), {
+      versions: workingVersions,
+      save: async () => {
+        await db.from("projects").update({ settings }).eq("id", projectId);
+      },
+    });
     const repo = project.codebase ? makeRepoTools(project.codebase) : null;
     // A new design (or a big request) is split into plan, build and check, each its own invocation.
     const newest = (history ?? []).find((m) => m.role === "user");
@@ -646,11 +656,13 @@ export async function runTurn(db: SupabaseClient, projectId: string, opts: TurnO
     };
 
     const finish = async (reply: string | null) => {
-      if (settings.phase || settings.plan || settings.buildReply || settings.buildModel) {
+      if (settings.phase || settings.plan || settings.buildReply || settings.buildModel || settings.workingVersions) {
         delete settings.phase;
         delete settings.plan;
         delete settings.buildReply;
         delete settings.buildModel;
+        // Done (and checked): the versions written in this request are final; the next change starts new ones.
+        delete settings.workingVersions;
         await db.from("projects").update({ settings }).eq("id", projectId);
       }
       if (reply) {
